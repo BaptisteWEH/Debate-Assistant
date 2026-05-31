@@ -1,8 +1,7 @@
 ﻿"use client";
 
-import { useState, useRef, useEffect } from "react";
-import { useSearchParams, Suspense } from "next/navigation";
-
+import { useState, useRef, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Message {
