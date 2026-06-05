@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -86,6 +87,12 @@ export default function UploadPage() {
                 <p className="text-gray-600">
                     Upload a paper, article, or policy brief to begin your debate.
                 </p>
+                <Link
+                    href="/rubric"
+                    className="text-sm text-gray-400 hover:text-gray-700 underline underline-offset-2 transition-colors"
+                >
+                    See scoring rubric
+                </Link>
 
                 {/* Drop zone */}
                 <label
