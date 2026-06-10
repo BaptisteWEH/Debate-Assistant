@@ -10,22 +10,22 @@ from pypdf import PdfReader
 from services.rag_service import RAGIndex
 
 
-# ─── Chargement de la configuration ────────────────────────────────────────────
+# ─── Configuration loading ─────────────────────────────────────────────────────
 
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY introuvable. Vérifie que le fichier .env existe "
-        "et contient bien la variable GEMINI_API_KEY."
+        "GEMINI_API_KEY not found. Make sure the .env file exists "
+        "and contains the GEMINI_API_KEY variable."
     )
 
 genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
-# ─── Application FastAPI ───────────────────────────────────────────────────────
+# ─── FastAPI application ───────────────────────────────────────────────────────
 
 app = FastAPI(title="DebateCoach Backend")
 
@@ -38,10 +38,10 @@ app.add_middleware(
 )
 
 
-# ─── Fonction helper : call_gemini ─────────────────────────────────────────────
+# ─── Helper function: call_gemini ──────────────────────────────────────────────
 
 def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
-    """Appelle Gemini et retourne le texte généré."""
+    """Calls Gemini and returns the generated text."""
     try:
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
@@ -54,15 +54,15 @@ def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
         raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
 
 
-# ─── Fonction helper : extraction du texte d'un PDF ────────────────────────────
+# ─── Helper function: PDF text extraction ─────────────────────────────────────
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     """
-    Prend les bytes d'un fichier PDF et retourne tout son texte en une seule
-    chaîne. Si l'extraction échoue, retourne une chaîne vide.
+    Takes the bytes of a PDF file and returns all its text as a single string.
+    Returns an empty string if extraction fails.
     """
     try:
-        # PdfReader veut un objet "file-like", on enveloppe les bytes dans BytesIO
+        # PdfReader expects a file-like object, so we wrap the bytes in BytesIO
         reader = PdfReader(io.BytesIO(pdf_bytes))
         pages_text = []
         for i, page in enumerate(reader.pages):
@@ -73,11 +73,11 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     except Exception as e:
         print(f"[PDF EXTRACT ERROR] {e}")
         return ""
-    
-    
+
+
 def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
     """
-    Extrait le texte page par page pour conserver les vrais numéros de page.
+    Extracts text page by page to preserve real page numbers.
     """
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -102,14 +102,13 @@ def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
 
 def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
     """
-    Découpe le texte en quelques extraits courts pour le panneau Evidence.
-    Version naïve : on prend des chunks fixes du début, milieu, fin du document.
-    L'étape 3b remplacera ça par une vraie recherche sémantique.
+    Splits the text into a few short excerpts for the Evidence panel.
+    Naive version: takes fixed chunks from the beginning, middle, and end of the document.
     """
     if not text:
         return []
 
-    chunk_size = 400  # ~400 caractères par snippet
+    chunk_size = 400  # ~400 characters per snippet
     total = len(text)
 
     if total < chunk_size:
@@ -120,7 +119,7 @@ def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
             "score": 1.0,
         }]
 
-    # On prend des extraits espacés dans le document
+    # Take evenly spaced excerpts throughout the document
     positions = [0, total // 2, max(0, total - chunk_size)]
     snippets = []
     for i, pos in enumerate(positions[:max_snippets]):
@@ -128,14 +127,14 @@ def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
         if excerpt:
             snippets.append({
                 "id": f"chunk-{i+1}",
-                "page": (pos // 2000) + 1,  # approximation page
+                "page": (pos // 2000) + 1,  # page approximation
                 "text": excerpt,
                 "score": round(0.9 - i * 0.1, 2),
             })
     return snippets
 
 
-# ─── Schémas Pydantic ──────────────────────────────────────────────────────────
+# ─── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class DebateRequest(BaseModel):
     message: str
@@ -146,60 +145,60 @@ class EndSessionRequest(BaseModel):
     session_id: str
 
 
-# ─── Mémoire de session ────────────────────────────────────────────────────────
+# ─── Session memory ────────────────────────────────────────────────────────────
 
 sessions: dict[str, dict] = {}
 
 
-# ─── Route 1 : POST /upload ────────────────────────────────────────────────────
+# ─── Route 1: POST /upload ─────────────────────────────────────────────────────
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[UPLOAD] Reçu : {file.filename} (session : {session_id})")
+    print(f"[UPLOAD] Received: {file.filename} (session: {session_id})")
 
-    # Lire les bytes du fichier
+    # Read file bytes
     pdf_bytes = await file.read()
 
-    # Extraire le texte du PDF
+    # Extract PDF text
     pages = extract_pdf_pages(pdf_bytes)
     document_text = "\n\n".join(page["text"] for page in pages)
 
     if not document_text:
         raise HTTPException(
             status_code=400,
-            detail="Impossible d'extraire le texte de ce PDF. "
-                "Est-il bien un PDF avec du texte (pas une image scannée) ?"
+            detail="Unable to extract text from this PDF. "
+                "Is it a text-based PDF (not a scanned image)?"
         )
 
-    print(f"[UPLOAD] Texte extrait : {len(document_text)} caractères")
+    print(f"[UPLOAD] Extracted text: {len(document_text)} characters")
 
     rag_index = RAGIndex.from_pages_documents([
-    {
-        "filename": file.filename,
-        "pages": pages,
-    }
+        {
+            "filename": file.filename,
+            "pages": pages,
+        }
     ])
-    
-    print(f"[UPLOAD] Index RAG créé avec {len(rag_index.chunks)} chunks")
 
-    # Demander à Gemini une position d'ouverture, basée sur le VRAI contenu
+    print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks")
+
+    # Ask Gemini for an opening statement based on the actual document content
     system = (
-        "Tu es un débatteur expérimenté. Tu vas débattre contre un utilisateur "
-        "humain sur le sujet d'un document qu'il vient de fournir. Tu prends "
-        "une position claire (POUR ou CONTRE la thèse du document, à toi de choisir) "
-        "et tu la défendras tout au long du débat en t'appuyant sur le document."
+        "You are an experienced debater. You will debate against a human user "
+        "on the topic of a document they have just provided. Take a clear stance "
+        "(FOR or AGAINST the document's thesis, your choice) "
+        "and defend it throughout the debate using evidence from the document."
     )
 
     prompt = (
-        f"Voici le contenu du document :\n\n---\n{document_text}\n---\n\n"
-        f"Lis ce document, identifie sa thèse principale, et génère une phrase "
-        f"d'ouverture (2-3 phrases) où tu prends position et invites l'utilisateur "
-        f"à présenter son argument. Indique clairement quelle position tu défends."
+        f"Here is the document content:\n\n---\n{document_text}\n---\n\n"
+        f"Read this document, identify its main thesis, and generate an opening "
+        f"statement (2-3 sentences) where you take a position and invite the user "
+        f"to present their argument. Clearly state which position you are defending."
     )
 
     opening = call_gemini(prompt, system_instruction=system)
 
-    # Stocker tout dans la session
+    # Store everything in the session
     sessions[session_id] = {
         "filename": file.filename,
         "filenames": [file.filename],
@@ -216,7 +215,8 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
         "opening_statement": opening,
     }
 
-# ─── Route 1.2 : POST /upload-multiple ────────────────────────────────────────────────────
+
+# ─── Route 1.2: POST /upload-multiple ─────────────────────────────────────────
 
 @app.post("/upload-multiple")
 async def upload_multiple(
@@ -235,24 +235,24 @@ async def upload_multiple(
             detail="Upload at least one PDF file."
         )
 
-    print(f"[UPLOAD-MULTIPLE] Reçu {len(files)} fichier(s) (session : {session_id})")
+    print(f"[UPLOAD-MULTIPLE] Received {len(files)} file(s) (session: {session_id})")
 
     documents = []
     document_text_parts = []
 
     for file in files:
-        print(f"[UPLOAD-MULTIPLE] Lecture : {file.filename}")
+        print(f"[UPLOAD-MULTIPLE] Reading: {file.filename}")
 
         pdf_bytes = await file.read()
 
-        # Extraction page par page pour conserver les vraies pages
+        # Page-by-page extraction to preserve real page numbers
         pages = extract_pdf_pages(pdf_bytes)
         text = "\n\n".join(page["text"] for page in pages)
 
         if not text:
             raise HTTPException(
                 status_code=400,
-                detail=f"Impossible d'extraire le texte du PDF : {file.filename}"
+                detail=f"Unable to extract text from PDF: {file.filename}"
             )
 
         documents.append({
@@ -267,25 +267,24 @@ async def upload_multiple(
 
     document_text = "\n".join(document_text_parts)
 
-    print(f"[UPLOAD-MULTIPLE] Texte total extrait : {len(document_text)} caractères")
+    print(f"[UPLOAD-MULTIPLE] Total extracted text: {len(document_text)} characters")
 
-    # Création de l'index FAISS avec chunks source-aware et page-aware
+    # Build FAISS index with source-aware and page-aware chunks
     rag_index = RAGIndex.from_pages_documents(documents)
-    print(f"[UPLOAD-MULTIPLE] Index RAG créé avec {len(rag_index.chunks)} chunks")
+    print(f"[UPLOAD-MULTIPLE] RAG index created with {len(rag_index.chunks)} chunks")
 
     system = (
-        "Tu es un débatteur expérimenté. Tu vas débattre contre un utilisateur "
-        "humain sur le sujet de plusieurs documents fournis. Tu prends "
-        "une position claire et tu la défendras tout au long du débat en "
-        "t'appuyant sur les documents."
+        "You are an experienced debater. You will debate against a human user "
+        "on the topic of several provided documents. Take a clear stance "
+        "and defend it throughout the debate using evidence from the documents."
     )
 
     prompt = (
-        f"Voici le contenu des documents :\n\n---\n{document_text[:8000]}\n---\n\n"
-        f"Lis ces documents, identifie leur thème commun ou leurs désaccords, "
-        f"et génère une phrase d'ouverture de 2-3 phrases où tu prends position "
-        f"et invites l'utilisateur à présenter son argument. "
-        f"Indique clairement quelle position tu défends."
+        f"Here is the content of the documents:\n\n---\n{document_text[:8000]}\n---\n\n"
+        f"Read these documents, identify their common theme or points of disagreement, "
+        f"and generate an opening statement of 2-3 sentences where you take a position "
+        f"and invite the user to present their argument. "
+        f"Clearly state which position you are defending."
     )
 
     opening = call_gemini(prompt, system_instruction=system)
@@ -307,21 +306,21 @@ async def upload_multiple(
     }
 
 
-# ─── Route 2 : POST /debate ────────────────────────────────────────────────────
+# ─── Route 2: POST /debate ─────────────────────────────────────────────────────
 
 @app.post("/debate")
 async def debate(req: DebateRequest):
-    print(f"[DEBATE] Message reçu : {req.message[:80]}...")
+    print(f"[DEBATE] Message received: {req.message[:80]}...")
 
     session = sessions.get(req.session_id)
     if not session:
         raise HTTPException(
             status_code=404,
-            detail="Session introuvable. As-tu bien uploadé un document d'abord ?"
+            detail="Session not found. Did you upload a document first?"
         )
 
     document_text = session.get("document_text", "")
-    
+
     rag_index = session.get("rag_index")
 
     if rag_index:
@@ -335,23 +334,23 @@ async def debate(req: DebateRequest):
     )
 
     history_text = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'} : {msg['text']}"
+        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
         for msg in session["history"]
     )
 
     system = (
-        "Tu es un débatteur exigeant mais juste. Tu défends la position prise "
-        "au début du débat. Tu réponds en 2-4 phrases maximum, de manière "
-        "conversationnelle. Tu DOIS t'appuyer sur le contenu du document fourni "
-        "pour étayer tes arguments. Si l'utilisateur commet une erreur logique "
-        "évidente (ex : ad hominem, faux dilemme), signale-la avec respect."
+        "You are a rigorous but fair debater. You defend the position taken "
+        "at the start of the debate. Respond in 2-4 sentences maximum, in a "
+        "conversational tone. You MUST support your arguments with content from "
+        "the provided document. If the user commits an obvious logical fallacy "
+        "(e.g. ad hominem, false dilemma), point it out respectfully."
     )
 
     prompt = (
-        f"Passages pertinents récupérés par RAG :\n---\n{evidence_text}\n---\n\n"
-        f"Historique du débat :\n{history_text}\n\n"
-        f"L'utilisateur vient de dire : « {req.message} »\n\n"
-        f"Réponds en défendant ta position et en t'appuyant sur le document."
+        f"Relevant passages retrieved by RAG:\n---\n{evidence_text}\n---\n\n"
+        f"Debate history:\n{history_text}\n\n"
+        f"The user just said: \"{req.message}\"\n\n"
+        f"Respond by defending your position using evidence from the document."
     )
 
     ai_response = call_gemini(prompt, system_instruction=system)
@@ -367,51 +366,50 @@ async def debate(req: DebateRequest):
     }
 
 
-# ─── Route 3 : POST /transcribe (toujours factice) ─────────────────────────────
+# ─── Route 3: POST /transcribe (still a stub) ─────────────────────────────────
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[TRANSCRIBE] Audio reçu (session : {session_id}) — factice pour l'instant")
+    print(f"[TRANSCRIBE] Audio received (session: {session_id}) — stub for now")
     return {
-        "transcript": "Ceci est un texte transcrit factice. AWS Transcribe viendra à l'étape 4."
+        "transcript": "This is a stub transcript. AWS Transcribe will be integrated at step 4."
     }
 
 
-# ─── Route 4 : POST /end-session ───────────────────────────────────────────────
+# ─── Route 4: POST /end-session ───────────────────────────────────────────────
 
 @app.post("/end-session")
 async def end_session(req: EndSessionRequest):
-    print(f"[END-SESSION] Fin de session : {req.session_id}")
+    print(f"[END-SESSION] Ending session: {req.session_id}")
 
     session = sessions.get(req.session_id)
     if not session or not session["history"]:
         return {
             "score": {"user": 0, "ai": 0},
-            "summary": "Aucun débat à analyser.",
+            "summary": "No debate to analyze.",
             "transcript_url": None,
         }
 
     document_text = session.get("document_text", "")
     transcript = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'} : {msg['text']}"
+        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
         for msg in session["history"]
     )
 
     system = (
-        "Tu es un coach de débat expert. Tu analyses la performance d'un "
-        "utilisateur dans un débat contre une IA, sur un sujet défini par un "
-        "document de référence. Tu réponds UNIQUEMENT au format JSON valide, "
-        "avec cette structure : "
-        '{"user_score": <0-100>, "ai_score": <0-100>, "summary": "<texte>"}'
+        "You are an expert debate coach. You analyze the performance of a user "
+        "in a debate against an AI, on a topic defined by a reference document. "
+        "Respond ONLY in valid JSON format with this structure: "
+        '{"user_score": <0-100>, "ai_score": <0-100>, "summary": "<text>"}'
     )
 
     prompt = (
-        f"Document de référence (résumé) :\n---\n{document_text[:2000]}...\n---\n\n"
-        f"Transcript complet du débat :\n{transcript}\n\n"
-        f"Évalue la performance de l'utilisateur (User) sur 100 et celle de "
-        f"l'IA (AI) sur 100. Donne un résumé (2-3 phrases) avec des conseils "
-        f"concrets pour aider l'utilisateur à progresser. Évalue notamment si "
-        f"l'utilisateur s'est bien appuyé sur le document. Réponds en JSON valide."
+        f"Reference document (summary):\n---\n{document_text[:2000]}...\n---\n\n"
+        f"Full debate transcript:\n{transcript}\n\n"
+        f"Score the user's performance out of 100 and the AI's out of 100. "
+        f"Provide a summary (2-3 sentences) with concrete advice to help the user improve. "
+        f"Assess in particular whether the user drew on the document effectively. "
+        f"Respond in valid JSON."
     )
 
     raw_response = call_gemini(prompt, system_instruction=system)
@@ -427,11 +425,11 @@ async def end_session(req: EndSessionRequest):
         data = json.loads(cleaned)
         user_score = int(data.get("user_score", 0))
         ai_score = int(data.get("ai_score", 0))
-        summary = data.get("summary", "Analyse indisponible.")
+        summary = data.get("summary", "Analysis unavailable.")
     except (json.JSONDecodeError, ValueError):
-        print(f"[END-SESSION] JSON invalide reçu de Gemini : {raw_response}")
+        print(f"[END-SESSION] Invalid JSON received from Gemini: {raw_response}")
         user_score, ai_score = 50, 50
-        summary = "Le débat s'est bien déroulé, mais l'analyse détaillée n'a pas pu être générée."
+        summary = "The debate went well, but the detailed analysis could not be generated."
 
     return {
         "score": {"user": user_score, "ai": ai_score},
@@ -440,7 +438,7 @@ async def end_session(req: EndSessionRequest):
     }
 
 
-# ─── Route racine ──────────────────────────────────────────────────────────────
+# ─── Root route ────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
