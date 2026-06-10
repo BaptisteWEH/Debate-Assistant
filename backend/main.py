@@ -1,17 +1,3 @@
-"""
-DebateCoach — Backend (étape 3a : RAG naïf)
-
-Le PDF uploadé est maintenant LU : son texte est extrait avec pypdf, stocké
-dans la session, et injecté en entier dans les prompts Gemini.
-
-L'IA s'appuie maintenant vraiment sur le contenu du document, pas juste sur
-le nom du fichier. La route /debate renvoie aussi quelques extraits comme
-"evidence" affichable dans le panneau gauche du frontend.
-
-Limitation connue : pour des très gros documents (> ~100 pages), on dépassera
-la fenêtre de contexte de Gemini. L'étape 3b (FAISS) règlera ça.
-"""
-
 import os
 import io
 import json
@@ -161,7 +147,7 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
 
     print(f"[UPLOAD] Texte extrait : {len(document_text)} caractères")
 
-    rag_index = RAGIndex.from_text(document_text)
+    rag_index = RAGIndex.from_text(document_text, source=file.filename)
     print(f"[UPLOAD] Index RAG créé avec {len(rag_index.chunks)} chunks")
 
     # Demander à Gemini une position d'ouverture, basée sur le VRAI contenu
@@ -184,6 +170,7 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
     # Stocker tout dans la session
     sessions[session_id] = {
         "filename": file.filename,
+        "filenames": [file.filename],
         "document_text": document_text,
         "rag_index": rag_index,
         "ai_position": opening,
@@ -194,6 +181,91 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
 
     return {
         "session_id": session_id,
+        "opening_statement": opening,
+    }
+
+# ─── Route 1.2 : POST /upload-multiple ────────────────────────────────────────────────────
+
+@app.post("/upload-multiple")
+async def upload_multiple(
+    session_id: str = Form(...),
+    file1: UploadFile | None = File(None),
+    file2: UploadFile | None = File(None),
+    file3: UploadFile | None = File(None),
+    file4: UploadFile | None = File(None),
+    file5: UploadFile | None = File(None),
+):
+    files = [f for f in [file1, file2, file3, file4, file5] if f is not None]
+
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload at least one PDF file."
+        )
+
+    print(f"[UPLOAD-MULTIPLE] Reçu {len(files)} fichier(s) (session : {session_id})")
+
+    documents = []
+    document_text_parts = []
+
+    for file in files:
+        print(f"[UPLOAD-MULTIPLE] Lecture : {file.filename}")
+
+        pdf_bytes = await file.read()
+        text = extract_pdf_text(pdf_bytes)
+
+        if not text:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Impossible d'extraire le texte du PDF : {file.filename}"
+            )
+
+        documents.append({
+            "filename": file.filename,
+            "text": text,
+        })
+
+        document_text_parts.append(
+            f"\n\n===== DOCUMENT: {file.filename} =====\n\n{text}"
+        )
+
+    document_text = "\n".join(document_text_parts)
+
+    print(f"[UPLOAD-MULTIPLE] Texte total extrait : {len(document_text)} caractères")
+
+    rag_index = RAGIndex.from_documents(documents)
+    print(f"[UPLOAD-MULTIPLE] Index RAG créé avec {len(rag_index.chunks)} chunks")
+
+    system = (
+        "Tu es un débatteur expérimenté. Tu vas débattre contre un utilisateur "
+        "humain sur le sujet de plusieurs documents fournis. Tu prends "
+        "une position claire et tu la défendras tout au long du débat en "
+        "t'appuyant sur les documents."
+    )
+
+    prompt = (
+        f"Voici le contenu des documents :\n\n---\n{document_text[:8000]}\n---\n\n"
+        f"Lis ces documents, identifie leur thème commun ou leurs désaccords, "
+        f"et génère une phrase d'ouverture de 2-3 phrases où tu prends position "
+        f"et invites l'utilisateur à présenter son argument. "
+        f"Indique clairement quelle position tu défends."
+    )
+
+    opening = call_gemini(prompt, system_instruction=system)
+
+    sessions[session_id] = {
+        "filenames": [doc["filename"] for doc in documents],
+        "document_text": document_text,
+        "rag_index": rag_index,
+        "ai_position": opening,
+        "history": [
+            {"role": "ai", "text": opening}
+        ],
+    }
+
+    return {
+        "session_id": session_id,
+        "filenames": [doc["filename"] for doc in documents],
         "opening_statement": opening,
     }
 
@@ -221,7 +293,7 @@ async def debate(req: DebateRequest):
         evidence = make_evidence_snippets(document_text, max_snippets=3)
 
     evidence_text = "\n\n".join(
-        f"[{item['id']} | page {item['page']} | score {item['score']}]\n{item['text']}"
+        f"[{item['id']} | source {item.get('source', 'unknown')} | page {item['page']} | score {item['score']}]\n{item['text']}"
         for item in evidence
     )
 
@@ -339,5 +411,5 @@ async def root():
         "status": "DebateCoach backend is running",
         "model": GEMINI_MODEL,
         "active_sessions": len(sessions),
-        "rag_mode": "FAISS + Gemini embeddings",
+        "rag_mode": "FAISS + Gemini embeddings with source-aware chunks",
     }

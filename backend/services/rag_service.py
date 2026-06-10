@@ -7,19 +7,29 @@ import google.generativeai as genai
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
-def chunk_text(text: str, chunk_size: int = 300, overlap: int = 60) -> list[dict]:
+def safe_source_name(filename: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", filename)
+
+
+def chunk_text(
+    text: str,
+    source: str,
+    chunk_size: int = 300,
+    overlap: int = 60,
+) -> list[dict]:
     words = re.findall(r"\S+", text)
     chunks = []
-
     start = 0
     chunk_id = 1
+    safe_source = safe_source_name(source)
 
     while start < len(words):
         end = min(start + chunk_size, len(words))
         chunk_words = words[start:end]
 
         chunks.append({
-            "id": f"chunk-{chunk_id}",
+            "id": f"{safe_source}_chunk_{chunk_id}",
+            "source": source,
             "page": max(1, start // 350),
             "text": " ".join(chunk_words),
         })
@@ -49,14 +59,27 @@ class RAGIndex:
         self.index = index
 
     @classmethod
-    def from_text(cls, text: str):
-        chunks = chunk_text(text)
+    def from_text(cls, text: str, source: str = "document"):
+        return cls.from_documents([
+            {"filename": source, "text": text}
+        ])
 
-        if not chunks:
-            raise ValueError("No chunks created from document.")
+    @classmethod
+    def from_documents(cls, documents: list[dict]):
+        all_chunks = []
+
+        for doc in documents:
+            chunks = chunk_text(
+                text=doc["text"],
+                source=doc["filename"],
+            )
+            all_chunks.extend(chunks)
+
+        if not all_chunks:
+            raise ValueError("No chunks created from documents.")
 
         embeddings = []
-        for chunk in chunks:
+        for chunk in all_chunks:
             embedding = embed_text(
                 chunk["text"],
                 task_type="retrieval_document",
@@ -69,7 +92,7 @@ class RAGIndex:
         index = faiss.IndexFlatIP(matrix.shape[1])
         index.add(matrix)
 
-        return cls(chunks=chunks, index=index)
+        return cls(chunks=all_chunks, index=index)
 
     def search(self, query: str, top_k: int = 3) -> list[dict]:
         query_embedding = embed_text(
@@ -90,6 +113,7 @@ class RAGIndex:
 
             results.append({
                 "id": chunk["id"],
+                "source": chunk["source"],
                 "page": chunk["page"],
                 "text": chunk["text"],
                 "score": float(round(score, 4)),
