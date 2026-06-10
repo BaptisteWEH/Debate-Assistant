@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
 from pypdf import PdfReader
+from services.rag_service import RAGIndex
 
 
 # ─── Chargement de la configuration ────────────────────────────────────────────
@@ -160,6 +161,9 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
 
     print(f"[UPLOAD] Texte extrait : {len(document_text)} caractères")
 
+    rag_index = RAGIndex.from_text(document_text)
+    print(f"[UPLOAD] Index RAG créé avec {len(rag_index.chunks)} chunks")
+
     # Demander à Gemini une position d'ouverture, basée sur le VRAI contenu
     system = (
         "Tu es un débatteur expérimenté. Tu vas débattre contre un utilisateur "
@@ -181,6 +185,7 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
     sessions[session_id] = {
         "filename": file.filename,
         "document_text": document_text,
+        "rag_index": rag_index,
         "ai_position": opening,
         "history": [
             {"role": "ai", "text": opening}
@@ -207,6 +212,19 @@ async def debate(req: DebateRequest):
         )
 
     document_text = session.get("document_text", "")
+    
+    rag_index = session.get("rag_index")
+
+    if rag_index:
+        evidence = rag_index.search(req.message, top_k=3)
+    else:
+        evidence = make_evidence_snippets(document_text, max_snippets=3)
+
+    evidence_text = "\n\n".join(
+        f"[{item['id']} | page {item['page']} | score {item['score']}]\n{item['text']}"
+        for item in evidence
+    )
+
     history_text = "\n".join(
         f"{'AI' if msg['role'] == 'ai' else 'User'} : {msg['text']}"
         for msg in session["history"]
@@ -221,7 +239,7 @@ async def debate(req: DebateRequest):
     )
 
     prompt = (
-        f"Contenu du document de référence :\n---\n{document_text}\n---\n\n"
+        f"Passages pertinents récupérés par RAG :\n---\n{evidence_text}\n---\n\n"
         f"Historique du débat :\n{history_text}\n\n"
         f"L'utilisateur vient de dire : « {req.message} »\n\n"
         f"Réponds en défendant ta position et en t'appuyant sur le document."
@@ -231,9 +249,6 @@ async def debate(req: DebateRequest):
 
     session["history"].append({"role": "user", "text": req.message})
     session["history"].append({"role": "ai", "text": ai_response})
-
-    # Générer quelques snippets factices pour le panneau Evidence
-    evidence = make_evidence_snippets(document_text, max_snippets=3)
 
     return {
         "response": ai_response,
@@ -324,5 +339,5 @@ async def root():
         "status": "DebateCoach backend is running",
         "model": GEMINI_MODEL,
         "active_sessions": len(sessions),
-        "rag_mode": "naive (full document in prompt)",
+        "rag_mode": "FAISS + Gemini embeddings",
     }
