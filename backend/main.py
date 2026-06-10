@@ -10,7 +10,7 @@ from pypdf import PdfReader
 from services.rag_service import RAGIndex
 
 
-# ─── Configuration loading ─────────────────────────────────────────────────────
+# Configuration loading
 
 load_dotenv()
 
@@ -25,7 +25,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
-# ─── FastAPI application ───────────────────────────────────────────────────────
+# FastAPI application 
 
 app = FastAPI(title="DebateCoach Backend")
 
@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 
-# ─── Helper function: call_gemini ──────────────────────────────────────────────
+# Helper function: call_gemini
 
 def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
     """Calls Gemini and returns the generated text."""
@@ -54,7 +54,7 @@ def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
         raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
 
 
-# ─── Helper function: PDF text extraction ─────────────────────────────────────
+# Helper function: PDF text extraction 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     """
@@ -134,7 +134,7 @@ def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
     return snippets
 
 
-# ─── Pydantic schemas ──────────────────────────────────────────────────────────
+# Pydantic schemas
 
 class DebateRequest(BaseModel):
     message: str
@@ -145,12 +145,12 @@ class EndSessionRequest(BaseModel):
     session_id: str
 
 
-# ─── Session memory ────────────────────────────────────────────────────────────
+# Session memory
 
-sessions: dict[str, dict] = {}
+sessions: dict[str, dict] = {} # for now, no persistent memory, just in-memory storage
 
 
-# ─── Route 1: POST /upload ─────────────────────────────────────────────────────
+# Route 1: POST /upload 
 
 @app.post("/upload")
 async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
@@ -216,7 +216,7 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
     }
 
 
-# ─── Route 1.2: POST /upload-multiple ─────────────────────────────────────────
+# Route 1.2: POST /upload-multiple 
 
 @app.post("/upload-multiple")
 async def upload_multiple(
@@ -306,7 +306,7 @@ async def upload_multiple(
     }
 
 
-# ─── Route 2: POST /debate ─────────────────────────────────────────────────────
+# Route 2: POST /debate
 
 @app.post("/debate")
 async def debate(req: DebateRequest):
@@ -366,17 +366,17 @@ async def debate(req: DebateRequest):
     }
 
 
-# ─── Route 3: POST /transcribe (still a stub) ─────────────────────────────────
+# Route 3: POST /transcribe
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...), session_id: str = Form(...)):
     print(f"[TRANSCRIBE] Audio received (session: {session_id}) — stub for now")
     return {
-        "transcript": "This is a stub transcript. AWS Transcribe will be integrated at step 4."
+        "transcript": "TO DO."
     }
 
 
-# ─── Route 4: POST /end-session ───────────────────────────────────────────────
+# Route 4: POST /end-session 
 
 @app.post("/end-session")
 async def end_session(req: EndSessionRequest):
@@ -438,7 +438,7 @@ async def end_session(req: EndSessionRequest):
     }
 
 
-# ─── Root route ────────────────────────────────────────────────────────────────
+# Root route 
 
 @app.get("/")
 async def root():
