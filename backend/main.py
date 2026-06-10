@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from pypdf import PdfReader
 from services.rag_service import RAGIndex
+from services.agent_service import DebateAgent
 
 
 # Configuration loading
@@ -53,6 +54,13 @@ def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
         print(f"[GEMINI ERROR] {e}")
         raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
 
+
+# Agent system initialization
+
+debate_agent = DebateAgent(
+    google_api_key=GEMINI_API_KEY,
+    model_name=GEMINI_MODEL,
+)
 
 # Helper function: PDF text extraction 
 
@@ -306,7 +314,7 @@ async def upload_multiple(
     }
 
 
-# Route 2: POST /debate
+# Route 2: POST /debate orchestated by an agent system
 
 @app.post("/debate")
 async def debate(req: DebateRequest):
@@ -319,49 +327,32 @@ async def debate(req: DebateRequest):
             detail="Session not found. Did you upload a document first?"
         )
 
-    document_text = session.get("document_text", "")
-
     rag_index = session.get("rag_index")
+    history = session.get("history", [])
+    ai_position = session.get("ai_position", "")
 
-    if rag_index:
-        evidence = rag_index.search(req.message, top_k=3)
-    else:
-        evidence = make_evidence_snippets(document_text, max_snippets=3)
-
-    evidence_text = "\n\n".join(
-        f"[{item['id']} | source {item.get('source', 'unknown')} | pages {item.get('pages', 'unknown')} | score {item['score']}]\n{item['text']}"
-        for item in evidence
+    agent_result = debate_agent.process_turn(
+        user_message=req.message,
+        history=history,
+        rag_index=rag_index,
+        ai_position=ai_position,
     )
 
-    history_text = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
-        for msg in session["history"]
-    )
-
-    system = (
-        "You are a rigorous but fair debater. You defend the position taken "
-        "at the start of the debate. Respond in 2-4 sentences maximum, in a "
-        "conversational tone. You MUST support your arguments with content from "
-        "the provided document. If the user commits an obvious logical fallacy "
-        "(e.g. ad hominem, false dilemma), point it out respectfully."
-    )
-
-    prompt = (
-        f"Relevant passages retrieved by RAG:\n---\n{evidence_text}\n---\n\n"
-        f"Debate history:\n{history_text}\n\n"
-        f"The user just said: \"{req.message}\"\n\n"
-        f"Respond by defending your position using evidence from the document."
-    )
-
-    ai_response = call_gemini(prompt, system_instruction=system)
+    ai_response = agent_result["response"]
 
     session["history"].append({"role": "user", "text": req.message})
     session["history"].append({"role": "ai", "text": ai_response})
 
+    #debug print
+    print("[AGENT RESULT]", agent_result)
+    
     return {
         "response": ai_response,
         "audio_url": None,
-        "evidence": evidence,
+        "evidence": agent_result["evidence"],
+        "fallacy": agent_result["fallacy"],
+        "strategy": agent_result["strategy"],
+        "agent_actions": agent_result["agent_actions"],
         "session_id": req.session_id,
     }
 
