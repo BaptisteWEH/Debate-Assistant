@@ -4,10 +4,10 @@ import faiss
 import google.generativeai as genai
 
 
-EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[dict]:
+def chunk_text(text: str, chunk_size: int = 300, overlap: int = 60) -> list[dict]:
     words = re.findall(r"\S+", text)
     chunks = []
 
