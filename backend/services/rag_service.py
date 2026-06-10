@@ -11,32 +11,61 @@ def safe_source_name(filename: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", filename)
 
 
-def chunk_text(
-    text: str,
+def flatten_pages(pages: list[dict]) -> list[dict]:
+    """
+    Transforme des pages en liste de mots avec leur numéro de page.
+    """
+    tokens = []
+
+    for page in pages:
+        page_number = page["page"]
+        words = re.findall(r"\S+", page["text"])
+
+        for word in words:
+            tokens.append({
+                "word": word,
+                "page": page_number,
+            })
+
+    return tokens
+
+
+def chunk_pages(
+    pages: list[dict],
     source: str,
     chunk_size: int = 300,
     overlap: int = 60,
 ) -> list[dict]:
-    words = re.findall(r"\S+", text)
+    """
+    Crée des chunks glissants sur tout le document,
+    même si un chunk traverse plusieurs pages.
+    """
+    tokens = flatten_pages(pages)
     chunks = []
-    start = 0
-    chunk_id = 1
     safe_source = safe_source_name(source)
 
-    while start < len(words):
-        end = min(start + chunk_size, len(words))
-        chunk_words = words[start:end]
+    start = 0
+    chunk_id = 1
+
+    while start < len(tokens):
+        end = min(start + chunk_size, len(tokens))
+        chunk_tokens = tokens[start:end]
+
+        text = " ".join(token["word"] for token in chunk_tokens)
+        start_page = chunk_tokens[0]["page"]
+        end_page = chunk_tokens[-1]["page"]
 
         chunks.append({
             "id": f"{safe_source}_chunk_{chunk_id}",
             "source": source,
-            "page": max(1, start // 350),
-            "text": " ".join(chunk_words),
+            "start_page": start_page,
+            "end_page": end_page,
+            "text": text,
         })
 
         chunk_id += 1
 
-        if end == len(words):
+        if end == len(tokens):
             break
 
         start = end - overlap
@@ -59,18 +88,12 @@ class RAGIndex:
         self.index = index
 
     @classmethod
-    def from_text(cls, text: str, source: str = "document"):
-        return cls.from_documents([
-            {"filename": source, "text": text}
-        ])
-
-    @classmethod
-    def from_documents(cls, documents: list[dict]):
+    def from_pages_documents(cls, documents: list[dict]):
         all_chunks = []
 
         for doc in documents:
-            chunks = chunk_text(
-                text=doc["text"],
+            chunks = chunk_pages(
+                pages=doc["pages"],
                 source=doc["filename"],
             )
             all_chunks.extend(chunks)
@@ -79,6 +102,7 @@ class RAGIndex:
             raise ValueError("No chunks created from documents.")
 
         embeddings = []
+
         for chunk in all_chunks:
             embedding = embed_text(
                 chunk["text"],
@@ -105,6 +129,7 @@ class RAGIndex:
         scores, indices = self.index.search(query_embedding, top_k)
 
         results = []
+
         for score, idx in zip(scores[0], indices[0]):
             if idx == -1:
                 continue
@@ -114,7 +139,13 @@ class RAGIndex:
             results.append({
                 "id": chunk["id"],
                 "source": chunk["source"],
-                "page": chunk["page"],
+                "start_page": chunk["start_page"],
+                "end_page": chunk["end_page"],
+                "pages": (
+                    str(chunk["start_page"])
+                    if chunk["start_page"] == chunk["end_page"]
+                    else f"{chunk['start_page']}-{chunk['end_page']}"
+                ),
                 "text": chunk["text"],
                 "score": float(round(score, 4)),
             })

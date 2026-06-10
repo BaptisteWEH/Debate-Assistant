@@ -73,6 +73,31 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     except Exception as e:
         print(f"[PDF EXTRACT ERROR] {e}")
         return ""
+    
+    
+def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
+    """
+    Extrait le texte page par page pour conserver les vrais numéros de page.
+    """
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages = []
+
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            text = text.strip()
+
+            if text:
+                pages.append({
+                    "page": i + 1,
+                    "text": text,
+                })
+
+        return pages
+
+    except Exception as e:
+        print(f"[PDF PAGE EXTRACT ERROR] {e}")
+        return []
 
 
 def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
@@ -136,18 +161,25 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
     pdf_bytes = await file.read()
 
     # Extraire le texte du PDF
-    document_text = extract_pdf_text(pdf_bytes)
+    pages = extract_pdf_pages(pdf_bytes)
+    document_text = "\n\n".join(page["text"] for page in pages)
 
     if not document_text:
         raise HTTPException(
             status_code=400,
             detail="Impossible d'extraire le texte de ce PDF. "
-                   "Est-il bien un PDF avec du texte (pas une image scannée) ?"
+                "Est-il bien un PDF avec du texte (pas une image scannée) ?"
         )
 
     print(f"[UPLOAD] Texte extrait : {len(document_text)} caractères")
 
-    rag_index = RAGIndex.from_text(document_text, source=file.filename)
+    rag_index = RAGIndex.from_pages_documents([
+    {
+        "filename": file.filename,
+        "pages": pages,
+    }
+    ])
+    
     print(f"[UPLOAD] Index RAG créé avec {len(rag_index.chunks)} chunks")
 
     # Demander à Gemini une position d'ouverture, basée sur le VRAI contenu
@@ -212,7 +244,10 @@ async def upload_multiple(
         print(f"[UPLOAD-MULTIPLE] Lecture : {file.filename}")
 
         pdf_bytes = await file.read()
-        text = extract_pdf_text(pdf_bytes)
+
+        # Extraction page par page pour conserver les vraies pages
+        pages = extract_pdf_pages(pdf_bytes)
+        text = "\n\n".join(page["text"] for page in pages)
 
         if not text:
             raise HTTPException(
@@ -223,6 +258,7 @@ async def upload_multiple(
         documents.append({
             "filename": file.filename,
             "text": text,
+            "pages": pages,
         })
 
         document_text_parts.append(
@@ -233,7 +269,8 @@ async def upload_multiple(
 
     print(f"[UPLOAD-MULTIPLE] Texte total extrait : {len(document_text)} caractères")
 
-    rag_index = RAGIndex.from_documents(documents)
+    # Création de l'index FAISS avec chunks source-aware et page-aware
+    rag_index = RAGIndex.from_pages_documents(documents)
     print(f"[UPLOAD-MULTIPLE] Index RAG créé avec {len(rag_index.chunks)} chunks")
 
     system = (
@@ -293,7 +330,7 @@ async def debate(req: DebateRequest):
         evidence = make_evidence_snippets(document_text, max_snippets=3)
 
     evidence_text = "\n\n".join(
-        f"[{item['id']} | source {item.get('source', 'unknown')} | page {item['page']} | score {item['score']}]\n{item['text']}"
+        f"[{item['id']} | source {item.get('source', 'unknown')} | pages {item.get('pages', 'unknown')} | score {item['score']}]\n{item['text']}"
         for item in evidence
     )
 
