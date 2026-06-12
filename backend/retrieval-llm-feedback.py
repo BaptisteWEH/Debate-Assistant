@@ -1,4 +1,3 @@
-# retrieval-llm-feedback.py
 import fitz
 import json
 import faiss
@@ -10,7 +9,7 @@ from pathlib import Path
 
 
 API_KEY = "key"
-MODEL = "luxia3-llm-8b-0731"
+MODEL = "luxia3-llm-32b-0731"
 
 CACHE_FOLDER = Path("cache_chunks")
 CACHE_FOLDER.mkdir(exist_ok=True)
@@ -27,9 +26,6 @@ FALLACY_LABELS = [
 ]
 
 
-# =========================
-# ADAPTIVE CHUNKING CONFIG
-# =========================
 def get_chunk_config(text_len):
     """Pick chunk_size / overlap / k based on document length."""
     if text_len < 15000:
@@ -40,18 +36,12 @@ def get_chunk_config(text_len):
         return {"chunk_size": 1500, "overlap": 200, "k": 6}
 
 
-# =========================
-# PDF EXTRACTION
-# =========================
 def extract_pdf_text(pdf_path):
     doc = fitz.open(pdf_path)
     text = "".join(page.get_text() for page in doc)
     return text.replace("\x00", " ").strip()
 
 
-# =========================
-# LUXIA CHUNKING
-# =========================
 def luxia_chunk(text, chunk_size, overlap):
     response = requests.post(
         "https://bridge.luxiacloud.com/luxia/v1/document-chunk",
@@ -78,9 +68,6 @@ def luxia_chunk(text, chunk_size, overlap):
     return response.json()["chunks"]
 
 
-# =========================
-# CACHING (tagged by chunk config)
-# =========================
 def cache_tag(config):
     return f"cs{config['chunk_size']}_ov{config['overlap']}"
 
@@ -111,11 +98,6 @@ def load_embeddings(doc_name, config):
     return None
 
 
-# =========================
-# LUXIA EMBEDDING (single text, retry)
-# =========================
-# Luxia embedding endpoint appears to reject payloads above some size
-# (observed as HTTP 413). Truncate defensively before sending.
 MAX_EMBED_CHARS = 4000
 
 
@@ -152,9 +134,6 @@ def luxia_embedding(text, retries=8):
     raise Exception("Embedding failed after retries")
 
 
-# =========================
-# BUILD / LOAD INDEX FOR A DOCUMENT
-# =========================
 def prepare_document(pdf_path):
     """
     Given a PDF path, returns (chunks, faiss_index, config) using
@@ -195,9 +174,6 @@ def prepare_document(pdf_path):
     return chunks, index, config
 
 
-# =========================
-# RETRIEVAL
-# =========================
 def retrieve(query, index, chunks, k):
     q_vec = luxia_embedding(query)
     q_vec = np.array([q_vec], dtype="float32")
@@ -215,9 +191,6 @@ def retrieve(query, index, chunks, k):
     return results
 
 
-# =========================
-# LUXIA CHAT CALL (your original, unchanged)
-# =========================
 def call_luxia(prompt, retries=5):
     wait_time = 1.0
 
@@ -259,9 +232,6 @@ def call_luxia(prompt, retries=5):
     return "error"
 
 
-# =========================
-# STEP 1: FALLACY CLASSIFICATION
-# =========================
 FALLACY_PROMPT_TEMPLATE = """You are an expert in logical fallacies.
 
 Classify the statement using the definitions below:
@@ -273,15 +243,8 @@ hasty_generalization: draws conclusion from too little evidence
 appeal_to_authority: claims something is true because an authority said so
 none: no fallacy
 
-Return ONLY one label and ONLY if there is strong evidence.
-slippery_slope, appeal_to_worse_problems, false_dilemma, hasty_generalization, appeal_to_authority
-
-If the statement could reasonably be interpreted as non-fallacious, return "none".
-
-IMPORTANT:
-Return exactly one label and nothing else.
-Do not explain your reasoning.
-Do not include any extra text.
+Return ONLY one label:
+slippery_slope, appeal_to_worse_problems, false_dilemma, hasty_generalization, appeal_to_authority, none
 
 Statement:
 {text}
@@ -297,20 +260,19 @@ def classify_fallacy(user_statement):
     prompt = FALLACY_PROMPT_TEMPLATE.format(text=user_statement)
     label = call_luxia(prompt)
 
-    # Only keep the first line
-    label = label.strip().splitlines()[0].strip().lower()
-
+    # sanitize: make sure we got a valid label back
+    label = label.strip().lower()
     if label not in FALLACY_LABELS:
+        # fall back to "none" if the model returned something unexpected
         print(f"[WARN] Unexpected fallacy label '{label}', defaulting to 'none'")
         label = "none"
 
     return label
 
 
-# =========================
-# STEP 2: MAIN RESPONSE PROMPT
-# =========================
-MAIN_PROMPT_TEMPLATE = """You are a debate assistant. Your responses must be based ONLY on the document excerpts provided below. Do not use outside knowledge. Do not refer to "chunks," "excerpts," "the document says," or similar meta-references — speak naturally, as if the information were simply part of your own argument. If the excerpts do not contain enough information to address the statement, say so explicitly rather than guessing.
+MAIN_PROMPT_TEMPLATE = """{persona}
+
+Your responses must be based ONLY on the document excerpts provided below. Do not use outside knowledge. Do not refer to "chunks," "excerpts," "the document says," or similar meta-references — speak naturally, as if the information were simply part of your own argument. If the excerpts do not contain enough information to address the statement, say so explicitly rather than guessing.
 
 {fallacy_note}
 
@@ -352,10 +314,63 @@ def build_context(retrieved_chunks):
     return "\n\n---\n\n".join(parts)
 
 
-# =========================
-# OPENING STANCE
-# =========================
-OPENING_PROMPT_TEMPLATE = """You are a debate assistant. Read the document excerpts below and take a clear stance on the central topic or argument of the document.
+DIFFICULTY_CONFIG = {
+    "easy": {
+        "persona": (
+            "You are a friendly, encouraging debate partner suited for beginners. "
+            "Keep your counterarguments gentle and straightforward. Avoid overly "
+            "complex reasoning chains. Occasionally acknowledge good points the "
+            "user makes before offering a counterpoint."
+        ),
+        "feedback_focus": (
+            "Focus on building confidence. Emphasize what the user did well, "
+            "use simple and encouraging language, and suggest only 1 small, "
+            "achievable improvement. Avoid overwhelming the user with multiple "
+            "criticisms."
+        ),
+    },
+    "medium": {
+        "persona": (
+            "You are a balanced, moderately challenging debate partner. Offer "
+            "well-reasoned counterarguments grounded in the reference material, "
+            "and point out weaknesses in the user's reasoning when relevant, "
+            "but remain collegial."
+        ),
+        "feedback_focus": (
+            "Provide a balanced mix of strengths and areas for improvement. "
+            "Point out any logical fallacies detected and explain briefly why "
+            "they weaken the argument. Suggest 1-2 concrete improvements."
+        ),
+    },
+    "hard": {
+        "persona": (
+            "You are a rigorous, challenging debate opponent. Press the user "
+            "on weaknesses, gaps in evidence, and logical inconsistencies. "
+            "Use the reference material to construct strong counterarguments "
+            "and do not concede points easily. Remain respectful but firm."
+        ),
+        "feedback_focus": (
+            "Be direct and critical. Thoroughly analyze weaknesses, including "
+            "every logical fallacy detected, unsupported claims, and missed "
+            "opportunities to engage with the reference material. Hold the "
+            "user to a high standard and give detailed, actionable suggestions "
+            "for improvement."
+        ),
+    },
+}
+
+
+def get_difficulty_config(level):
+    level = (level or "medium").strip().lower()
+    if level not in DIFFICULTY_CONFIG:
+        print(f"[WARN] Unknown difficulty '{level}', defaulting to 'medium'")
+        level = "medium"
+    return level, DIFFICULTY_CONFIG[level]
+
+
+OPENING_PROMPT_TEMPLATE = """{persona}
+
+Read the document excerpts below and take a clear stance on the central topic or argument of the document.
 
 Document excerpts:
 {context}
@@ -364,24 +379,20 @@ In exactly two sentences, state your stance (the position you will be arguing fo
 """
 
 
-def generate_opening_stance(index, chunks, k):
-    # Use a generic query to pull broadly representative chunks
-    # (e.g. abstract/intro tends to summarize the document's core argument)
+def generate_opening_stance(index, chunks, k, difficulty_cfg):
     overview_query = "main argument thesis summary of this document"
     retrieved = retrieve(overview_query, index, chunks, k)
     context = build_context(retrieved)
 
-    prompt = OPENING_PROMPT_TEMPLATE.format(context=context)
+    prompt = OPENING_PROMPT_TEMPLATE.format(
+        persona=difficulty_cfg["persona"],
+        context=context
+    )
     response = call_luxia_preserve_case(prompt)
 
     return response, retrieved
 
 
-# =========================
-# CHAT CALL VARIANT THAT PRESERVES CASE
-# (call_luxia lowercases output, which is fine for the fallacy
-#  label but not for natural-language debate responses)
-# =========================
 def call_luxia_preserve_case(prompt, retries=5):
     wait_time = 1.0
 
@@ -423,10 +434,7 @@ def call_luxia_preserve_case(prompt, retries=5):
     return "error"
 
 
-# =========================
-# FULL PIPELINE: ANSWER USER STATEMENT (case-preserving response)
-# =========================
-def answer_user_statement(user_statement, index, chunks, k):
+def answer_user_statement(user_statement, index, chunks, k, difficulty_cfg):
     # Step 1: fallacy check (independent of retrieval)
     fallacy_label = classify_fallacy(user_statement)
 
@@ -438,6 +446,7 @@ def answer_user_statement(user_statement, index, chunks, k):
     context = build_context(retrieved)
 
     prompt = MAIN_PROMPT_TEMPLATE.format(
+        persona=difficulty_cfg["persona"],
         fallacy_note=fallacy_note,
         context=context,
         user_statement=user_statement
@@ -452,60 +461,20 @@ def answer_user_statement(user_statement, index, chunks, k):
     }
 
 
-# =========================
-# END-OF-DEBATE FEEDBACK
-# =========================
-FEEDBACK_PROMPT_TEMPLATE = """You are an experienced debate coach.
-
-Below is the transcript of a debate between a USER and an AI debate assistant based on a source document.
+FEEDBACK_PROMPT_TEMPLATE = """You are a debate coach. Below is the transcript of a debate (difficulty level: {difficulty}) between a user and an AI debate assistant, based on a document the user uploaded.
 
 Transcript:
 {transcript}
 
-Your task is to evaluate ONLY the USER's debate performance. Do not critique the AI debater except where necessary to explain the user's missed opportunities.
+Write feedback for the USER (not the AI) covering:
+1. A brief summary (2-3 sentences) of how the debate went and the main points the user raised.
+2. What the user did well (e.g. use of evidence, clarity, addressing counterarguments).
+3. Specific areas for improvement (e.g. logical fallacies detected during the debate, missed opportunities to engage with the document, weak or unsupported claims).
+4. One or two concrete suggestions for how the user could strengthen their arguments next time.
 
-Write feedback with the following sections:
+{feedback_focus}
 
-1. Summary (2-3 sentences)
-   - Briefly summarize the debate.
-   - Identify the user's main arguments and strategy.
-
-2. Strengths
-   - Identify 2-3 things the user did well.
-   - Reference specific arguments or moments from the transcript.
-
-3. Areas for Improvement
-   - Focus on weaknesses in reasoning, evidence, rebuttal quality, or engagement with the document.
-   - If you identify a logical fallacy, only label it if there is clear evidence for that specific fallacy. Only mention the fallacy if the transcript itself clearly supports the classification. Otherwise ignore the label.
-   - Do NOT speculate or force a fallacy label.
-   - Prefer explaining why an argument was weak rather than naming a fallacy.
-   - Distinguish between:
-       * unsupported claims,
-       * weak evidence,
-       * missed opportunities,
-       * logical fallacies,
-       * repetition.
-
-4. Suggestions
-   - Give 1-2 concrete ways the user could improve future debates.
-
-5. Ratings (1-10)
-   - Clarity
-   - Use of Evidence
-   - Rebuttal Quality
-   - Engagement with Opponent's Arguments
-   - Logical Rigor
-
-For each rating, provide a brief one-sentence justification.
-
-Guidelines:
-- Base all feedback strictly on the transcript.
-- Cite specific examples from the user's arguments.
-- Do not invent evidence or claims.
-- Do not criticize the user for failing to make arguments that were impossible given the transcript.
-- Automatically generated fallacy labels may be present in the transcript. Treat them as unreliable signals and verify them against the user's actual statements before mentioning them.
-- Be constructive, specific, and encouraging.
-- Keep total feedback under 200 words.
+Reference concrete moments from the transcript where relevant. Keep the total feedback under 200 words.
 """
 
 
@@ -529,19 +498,20 @@ def build_transcript(history):
     return "\n".join(lines)
 
 
-def generate_feedback(history):
+def generate_feedback(history, difficulty, difficulty_cfg):
     transcript = build_transcript(history)
 
     if not transcript.strip():
         return "No debate took place, so no feedback can be given."
 
-    prompt = FEEDBACK_PROMPT_TEMPLATE.format(transcript=transcript)
+    prompt = FEEDBACK_PROMPT_TEMPLATE.format(
+        difficulty=difficulty,
+        transcript=transcript,
+        feedback_focus=difficulty_cfg["feedback_focus"]
+    )
     return call_luxia_preserve_case(prompt)
 
 
-# =========================
-# SAVE CONVERSATION HISTORY
-# =========================
 def save_history(history, pdf_path, output_folder="chat_history"):
     out_dir = Path(output_folder)
     out_dir.mkdir(exist_ok=True)
@@ -556,18 +526,18 @@ def save_history(history, pdf_path, output_folder="chat_history"):
     return out_path
 
 
-# =========================
-# MAIN CONVERSATION LOOP
-# =========================
-def run_debate(pdf_path):
+def run_debate(pdf_path, difficulty="medium"):
+    difficulty, difficulty_cfg = get_difficulty_config(difficulty)
+
     chunks, index, config = prepare_document(pdf_path)
     k = config["k"]
     print(f"Document ready. Using k={k} (chunk_size={config['chunk_size']}, overlap={config['overlap']})")
+    print(f"Difficulty: {difficulty}")
 
     history = []
 
     # --- Chatbot opens the debate ---
-    opening_stance, opening_retrieved = generate_opening_stance(index, chunks, k)
+    opening_stance, opening_retrieved = generate_opening_stance(index, chunks, k, difficulty_cfg)
     print(f"\nChatbot: {opening_stance}\n")
 
     history.append({
@@ -594,7 +564,7 @@ def run_debate(pdf_path):
             })
             break
 
-        result = answer_user_statement(user_input, index, chunks, k)
+        result = answer_user_statement(user_input, index, chunks, k, difficulty_cfg)
 
         history.append({
             "role": "user",
@@ -615,7 +585,7 @@ def run_debate(pdf_path):
 
     # --- Generate feedback for the user ---
     print("\nGenerating feedback on your debate performance...\n")
-    feedback = generate_feedback(history)
+    feedback = generate_feedback(history, difficulty, difficulty_cfg)
     print("=== Debate Feedback ===")
     print(feedback)
     print("=======================\n")
@@ -631,9 +601,11 @@ def run_debate(pdf_path):
     print(f"\nConversation and feedback saved to {out_path}")
 
 
-# =========================
-# EXAMPLE USAGE
-# =========================
 if __name__ == "__main__":
-    pdf_path = r"C:\Users\silvi\Downloads\Articles DL\The_Sustainable_Dilemma_and_Strategy_Behind_Fast_F.pdf"
-    run_debate(pdf_path)
+    pdf_path =  r"C:\Users\silvi\PycharmProjects\pythonProject2\FastFashionSustainability.pdf"
+
+    difficulty_input = input("Choose difficulty (easy / medium / hard) [medium]: ").strip()
+    if not difficulty_input:
+        difficulty_input = "medium"
+
+    run_debate(pdf_path, difficulty=difficulty_input)
