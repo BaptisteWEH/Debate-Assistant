@@ -210,7 +210,8 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
     rag_index = RAGIndex.from_pages_documents([
         {"filename": file.filename, "pages": pages}
     ])
-    print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks")
+    print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks "
+          f"(config: {rag_index.config})")
 
     system = (
         "You are an experienced debater. You will debate against a human user "
@@ -285,7 +286,8 @@ async def upload_multiple(
     print(f"[UPLOAD-MULTIPLE] Total extracted text: {len(document_text)} characters")
 
     rag_index = RAGIndex.from_pages_documents(documents)
-    print(f"[UPLOAD-MULTIPLE] RAG index created with {len(rag_index.chunks)} chunks")
+    print(f"[UPLOAD-MULTIPLE] RAG index created with {len(rag_index.chunks)} chunks "
+          f"(config: {rag_index.config})")
 
     system = (
         "You are an experienced debater. You will debate against a human user "
@@ -369,7 +371,72 @@ async def debate(req: DebateRequest):
     }
 
 
-# Route 4: POST /end-session
+# Route 3: POST /end-session
+
+FEEDBACK_PROMPT_TEMPLATE = """You are an experienced debate coach.
+
+Below is the transcript of a debate between a USER and an AI debate assistant based on a source document.
+
+Transcript:
+{transcript}
+
+Your task is to evaluate ONLY the USER's debate performance. Do not critique the AI debater except where necessary to explain the user's missed opportunities.
+
+Write feedback with the following sections:
+
+1. Summary (2-3 sentences)
+   - Briefly summarize the debate.
+   - Identify the user's main arguments and strategy.
+
+2. Strengths
+   - Identify 2-3 things the user did well.
+   - Reference specific arguments or moments from the transcript.
+
+3. Areas for Improvement
+   - Focus on weaknesses in reasoning, evidence, rebuttal quality, or engagement with the document.
+   - If you identify a logical fallacy, only label it if there is clear evidence for that specific fallacy. Only mention the fallacy if the transcript itself clearly supports the classification. Otherwise ignore the label.
+   - Do NOT speculate or force a fallacy label.
+   - Prefer explaining why an argument was weak rather than naming a fallacy.
+   - Distinguish between:
+       * unsupported claims,
+       * weak evidence,
+       * missed opportunities,
+       * logical fallacies,
+       * repetition.
+
+4. Suggestions
+   - Give 1-2 concrete ways the user could improve future debates.
+
+5. Ratings (1-10)
+   - Clarity
+   - Use of Evidence
+   - Rebuttal Quality
+   - Engagement with Opponent's Arguments
+   - Logical Rigor
+
+For each rating, provide a brief one-sentence justification.
+
+Guidelines:
+- Base all feedback strictly on the transcript.
+- Cite specific examples from the user's arguments.
+- Do not invent evidence or claims.
+- Do not criticize the user for failing to make arguments that were impossible given the transcript.
+- Automatically generated fallacy labels may be present in the transcript. Treat them as unreliable signals and verify them against the user's actual statements before mentioning them.
+- Be constructive, specific, and encouraging.
+- Keep total feedback under 200 words.
+"""
+
+SCORE_PROMPT_TEMPLATE = """Based on this debate transcript, give two scores from 0-100:
+- user_score: how well the human user performed in the debate
+- ai_score: how well the AI debater performed
+
+Transcript:
+{transcript}
+
+Respond ONLY in valid JSON with this structure and nothing else:
+{{"user_score": <int 0-100>, "ai_score": <int 0-100>}}
+"""
+
 
 @app.post("/end-session")
 async def end_session(req: EndSessionRequest):
@@ -383,30 +450,20 @@ async def end_session(req: EndSessionRequest):
             "transcript_url": None,
         }
 
-    document_text = session_data.get("document_text", "")
     transcript = "\n".join(
         f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
         for msg in session_data["history"]
     )
 
-    system = (
-        "You are an expert debate coach. You analyze the performance of a user "
-        "in a debate against an AI, on a topic defined by a reference document. "
-        "Respond ONLY in valid JSON format with this structure: "
-        '{"user_score": <0-100>, "ai_score": <0-100>, "summary": "<text>"}'
-    )
-    prompt = (
-        f"Reference document (summary):\n---\n{document_text[:2000]}...\n---\n\n"
-        f"Full debate transcript:\n{transcript}\n\n"
-        f"Score the user's performance out of 100 and the AI's out of 100. "
-        f"Provide a summary (2-3 sentences) with concrete advice to help the user improve. "
-        f"Assess in particular whether the user drew on the document effectively. "
-        f"Respond in valid JSON."
-    )
+    # 1. Detailed qualitative feedback (free-form prose)
+    feedback_prompt = FEEDBACK_PROMPT_TEMPLATE.format(transcript=transcript)
+    summary = call_luxia(feedback_prompt)
 
-    raw_response = call_luxia(prompt, system_instruction=system)
+    # 2. Separate numeric scoring (kept as its own JSON-only call for reliability)
+    score_prompt = SCORE_PROMPT_TEMPLATE.format(transcript=transcript)
+    raw_score = call_luxia(score_prompt)
 
-    cleaned = raw_response.strip()
+    cleaned = raw_score.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```")[1]
         if cleaned.startswith("json"):
@@ -415,13 +472,11 @@ async def end_session(req: EndSessionRequest):
 
     try:
         data = json.loads(cleaned)
-        user_score = int(data.get("user_score", 0))
-        ai_score = int(data.get("ai_score", 0))
-        summary = data.get("summary", "Analysis unavailable.")
+        user_score = int(data.get("user_score", 50))
+        ai_score = int(data.get("ai_score", 50))
     except (json.JSONDecodeError, ValueError):
-        print(f"[END-SESSION] Invalid JSON received from Luxia: {raw_response}")
+        print(f"[END-SESSION] Invalid score JSON received: {raw_score}")
         user_score, ai_score = 50, 50
-        summary = "The debate went well, but the detailed analysis could not be generated."
 
     return {
         "score": {"user": user_score, "ai": ai_score},
@@ -438,5 +493,5 @@ async def root():
         "status": "DebateCoach backend is running",
         "model": LUXIA_MODEL,
         "active_faiss_indexes": len(faiss_cache),
-        "rag_mode": "FAISS + Luxia embeddings, sessions in DynamoDB",
+        "rag_mode": "FAISS + Luxia embeddings/chunking, sessions in DynamoDB",
     }
