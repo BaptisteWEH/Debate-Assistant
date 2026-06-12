@@ -1,3 +1,4 @@
+#session_store.py
 """
 Module de persistance des sessions dans DynamoDB.
 

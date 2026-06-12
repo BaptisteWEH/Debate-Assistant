@@ -1,30 +1,33 @@
+# main.py
 import os
 import io
 import json
+import time
+import random
+import requests
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import google.generativeai as genai
 from pypdf import PdfReader
 from services.rag_service import RAGIndex
 from services.agent_service import DebateAgent
-from services.session_store import save_session, load_session  # NEW
+from services.session_store import save_session, load_session
 
 
 # Configuration loading
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+LUXIA_API_KEY = os.getenv("LUXIA_API_KEY")
+if not LUXIA_API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY not found. Make sure the .env file exists "
-        "and contains the GEMINI_API_KEY variable."
+        "LUXIA_API_KEY not found. Make sure the .env file exists "
+        "and contains the LUXIA_API_KEY variable."
     )
 
-genai.configure(api_key=GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+LUXIA_MODEL = "luxia3-llm-8b-0731"
+LUXIA_CHAT_URL = "https://bridge.luxiacloud.com/luxia/v1/chat"
 
 
 # FastAPI application
@@ -40,26 +43,51 @@ app.add_middleware(
 )
 
 
-# Helper function: call_gemini
+# Helper function: call_luxia
 
-def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
-    try:
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system_instruction,
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"[GEMINI ERROR] {e}")
-        raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
+def call_luxia(prompt: str, system_instruction: str | None = None, retries: int = 5) -> str:
+    """Call Luxia's chat endpoint. System instruction is prepended to the prompt
+    since the bridge endpoint only accepts a single 'user' message."""
+    full_prompt = f"{system_instruction}\n\n{prompt}" if system_instruction else prompt
+
+    wait_time = 1.0
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                LUXIA_CHAT_URL,
+                headers={"apikey": LUXIA_API_KEY, "Content-Type": "application/json"},
+                json={
+                    "model": LUXIA_MODEL,
+                    "messages": [{"role": "user", "content": full_prompt}],
+                    "temperature": 0,
+                    "stream": False,
+                },
+                timeout=30,
+            )
+
+            if response.status_code == 429:
+                print(f"[LUXIA 429] sleeping {wait_time:.1f}s...")
+                time.sleep(wait_time + random.uniform(0, 0.5))
+                wait_time *= 2
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"].strip()
+
+        except Exception as e:
+            print(f"[LUXIA ERROR] {e}")
+            time.sleep(wait_time + random.uniform(0, 0.5))
+            wait_time *= 2
+
+    raise HTTPException(status_code=500, detail="Luxia error after retries")
 
 
 # Agent system initialization
 
 debate_agent = DebateAgent(
-    google_api_key=GEMINI_API_KEY,
-    model_name=GEMINI_MODEL,
+    luxia_api_key=LUXIA_API_KEY,
+    model_name=LUXIA_MODEL,
 )
 
 
@@ -196,7 +224,7 @@ async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
         f"statement (2-3 sentences) where you take a position and invite the user "
         f"to present their argument. Clearly state which position you are defending."
     )
-    opening = call_gemini(prompt, system_instruction=system)
+    opening = call_luxia(prompt, system_instruction=system)
 
     # Cache FAISS index in RAM
     faiss_cache[session_id] = rag_index
@@ -271,7 +299,7 @@ async def upload_multiple(
         f"and invite the user to present their argument. "
         f"Clearly state which position you are defending."
     )
-    opening = call_gemini(prompt, system_instruction=system)
+    opening = call_luxia(prompt, system_instruction=system)
 
     faiss_cache[session_id] = rag_index
 
@@ -341,14 +369,6 @@ async def debate(req: DebateRequest):
     }
 
 
-# Route 3: POST /transcribe (stub)
-
-@app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[TRANSCRIBE] Audio received (session: {session_id}) — stub")
-    return {"transcript": "TO DO."}
-
-
 # Route 4: POST /end-session
 
 @app.post("/end-session")
@@ -384,7 +404,7 @@ async def end_session(req: EndSessionRequest):
         f"Respond in valid JSON."
     )
 
-    raw_response = call_gemini(prompt, system_instruction=system)
+    raw_response = call_luxia(prompt, system_instruction=system)
 
     cleaned = raw_response.strip()
     if cleaned.startswith("```"):
@@ -399,7 +419,7 @@ async def end_session(req: EndSessionRequest):
         ai_score = int(data.get("ai_score", 0))
         summary = data.get("summary", "Analysis unavailable.")
     except (json.JSONDecodeError, ValueError):
-        print(f"[END-SESSION] Invalid JSON received from Gemini: {raw_response}")
+        print(f"[END-SESSION] Invalid JSON received from Luxia: {raw_response}")
         user_score, ai_score = 50, 50
         summary = "The debate went well, but the detailed analysis could not be generated."
 
@@ -416,7 +436,7 @@ async def end_session(req: EndSessionRequest):
 async def root():
     return {
         "status": "DebateCoach backend is running",
-        "model": GEMINI_MODEL,
+        "model": LUXIA_MODEL,
         "active_faiss_indexes": len(faiss_cache),
-        "rag_mode": "FAISS + Gemini embeddings, sessions in DynamoDB",
+        "rag_mode": "FAISS + Luxia embeddings, sessions in DynamoDB",
     }
