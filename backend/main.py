@@ -1,10 +1,12 @@
 # main.py
 import os
 import io
+import re
 import json
 import time
 import random
 import requests
+import unicodedata
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -107,6 +109,12 @@ def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
         print(f"[PDF PAGE EXTRACT ERROR] {e}")
         return []
 
+def clean_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\x00", " ")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
 
 # Pydantic schemas
 
@@ -240,6 +248,8 @@ async def upload(
         print(f"[UPLOAD] Reading: {file.filename}")
         pdf_bytes = await file.read()
         pages = extract_pdf_pages(pdf_bytes)
+        for p in pages:
+            p["text"] = clean_text(p["text"])
         text = "\n\n".join(page["text"] for page in pages)
 
         if not text:
