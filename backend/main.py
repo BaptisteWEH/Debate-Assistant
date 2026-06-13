@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from pypdf import PdfReader
 from services.rag_service import RAGIndex
-from services.agent_service import DebateAgent
+from services.agent_service import DebateAgent, DIFFICULTY_CONFIG, get_difficulty_config
 from services.session_store import save_session, load_session
 
 
@@ -93,19 +93,6 @@ debate_agent = DebateAgent(
 
 # Helper function: PDF text extraction
 
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages_text = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            pages_text.append(text.strip())
-        return "\n\n".join(pages_text)
-    except Exception as e:
-        print(f"[PDF EXTRACT ERROR] {e}")
-        return ""
-
-
 def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -119,27 +106,6 @@ def extract_pdf_pages(pdf_bytes: bytes) -> list[dict]:
     except Exception as e:
         print(f"[PDF PAGE EXTRACT ERROR] {e}")
         return []
-
-
-def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
-    if not text:
-        return []
-    chunk_size = 400
-    total = len(text)
-    if total < chunk_size:
-        return [{"id": "chunk-1", "page": 1, "text": text.strip(), "score": 1.0}]
-    positions = [0, total // 2, max(0, total - chunk_size)]
-    snippets = []
-    for i, pos in enumerate(positions[:max_snippets]):
-        excerpt = text[pos:pos + chunk_size].strip()
-        if excerpt:
-            snippets.append({
-                "id": f"chunk-{i+1}",
-                "page": (pos // 2000) + 1,
-                "text": excerpt,
-                "score": round(0.9 - i * 0.1, 2),
-            })
-    return snippets
 
 
 # Pydantic schemas
@@ -188,69 +154,71 @@ def get_or_rebuild_rag_index(session_id: str, session_data: dict) -> RAGIndex:
     return rag_index
 
 
-# Route 1: POST /upload
+def get_session_difficulty_cfg(session_data: dict) -> dict:
+    """
+    Returns the DIFFICULTY_CONFIG entry for this session.
+    Falls back to 'medium' for older sessions created before
+    difficulty was tracked.
+    """
+    difficulty = session_data.get("difficulty", "medium")
+    _, cfg = get_difficulty_config(difficulty)
+    return cfg
 
-@app.post("/upload")
-async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[UPLOAD] Received: {file.filename} (session: {session_id})")
 
-    pdf_bytes = await file.read()
-    pages = extract_pdf_pages(pdf_bytes)
-    document_text = "\n\n".join(page["text"] for page in pages)
+def generate_session_feedback(session_data: dict) -> dict:
+    """Shared logic: generates feedback + score from session history.
+    Returns the same shape as /end-session's response body."""
+    if not session_data or not session_data.get("history"):
+        return {
+            "score": {"user": 0, "ai": 0},
+            "summary": "No debate to analyze.",
+            "transcript_url": None,
+        }
 
-    if not document_text:
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to extract text from this PDF. "
-                "Is it a text-based PDF (not a scanned image)?"
-        )
-
-    print(f"[UPLOAD] Extracted text: {len(document_text)} characters")
-
-    rag_index = RAGIndex.from_pages_documents([
-        {"filename": file.filename, "pages": pages}
-    ])
-    print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks "
-          f"(config: {rag_index.config})")
-
-    system = (
-        "You are an experienced debater. You will debate against a human user "
-        "on the topic of a document they have just provided. Take a clear stance "
-        "(FOR or AGAINST the document's thesis, your choice) "
-        "and defend it throughout the debate using evidence from the document."
+    transcript = "\n".join(
+        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
+        for msg in session_data["history"]
     )
-    prompt = (
-        f"Here is the document content:\n\n---\n{document_text}\n---\n\n"
-        f"Read this document, identify its main thesis, and generate an opening "
-        f"statement (2-3 sentences) where you take a position and invite the user "
-        f"to present their argument. Clearly state which position you are defending."
+
+    difficulty_cfg = get_session_difficulty_cfg(session_data)
+
+    feedback_prompt = FEEDBACK_PROMPT_TEMPLATE.format(
+        transcript=transcript,
+        feedback_focus=difficulty_cfg["feedback_focus"],
     )
-    opening = call_luxia(prompt, system_instruction=system)
+    summary = call_luxia(feedback_prompt)
 
-    # Cache FAISS index in RAM
-    faiss_cache[session_id] = rag_index
+    score_prompt = SCORE_PROMPT_TEMPLATE.format(transcript=transcript)
+    raw_score = call_luxia(score_prompt)
 
-    # Persist everything else in DynamoDB
-    session_data = {
-        "filename": file.filename,
-        "filenames": [file.filename],
-        "document_text": document_text,
-        "ai_position": opening,
-        "history": [{"role": "ai", "text": opening}],
-    }
-    save_session(session_id, session_data)
+    cleaned = raw_score.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+        user_score = int(data.get("user_score", 50))
+        ai_score = int(data.get("ai_score", 50))
+    except (json.JSONDecodeError, ValueError):
+        print(f"[FEEDBACK] Invalid score JSON received: {raw_score}")
+        user_score, ai_score = 50, 50
 
     return {
-        "session_id": session_id,
-        "opening_statement": opening,
+        "score": {"user": user_score, "ai": ai_score},
+        "summary": summary,
+        "transcript_url": None,
     }
 
 
-# Route 1.2: POST /upload-multiple
+# Route 1: POST /upload (5 files)
 
-@app.post("/upload-multiple")
-async def upload_multiple(
+@app.post("/upload")
+async def upload(
     session_id: str = Form(...),
+    difficulty: str = Form("medium"),
     file1: UploadFile | None = File(None),
     file2: UploadFile | None = File(None),
     file3: UploadFile | None = File(None),
@@ -262,13 +230,14 @@ async def upload_multiple(
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF file.")
 
-    print(f"[UPLOAD-MULTIPLE] Received {len(files)} file(s) (session: {session_id})")
+    difficulty, difficulty_cfg = get_difficulty_config(difficulty)
+    print(f"[UPLOAD] Received {len(files)} file(s) (session: {session_id}, difficulty: {difficulty})")
 
     documents = []
     document_text_parts = []
 
     for file in files:
-        print(f"[UPLOAD-MULTIPLE] Reading: {file.filename}")
+        print(f"[UPLOAD] Reading: {file.filename}")
         pdf_bytes = await file.read()
         pages = extract_pdf_pages(pdf_bytes)
         text = "\n\n".join(page["text"] for page in pages)
@@ -283,25 +252,16 @@ async def upload_multiple(
         document_text_parts.append(f"\n\n===== DOCUMENT: {file.filename} =====\n\n{text}")
 
     document_text = "\n".join(document_text_parts)
-    print(f"[UPLOAD-MULTIPLE] Total extracted text: {len(document_text)} characters")
+    print(f"[UPLOAD] Total extracted text: {len(document_text)} characters")
 
     rag_index = RAGIndex.from_pages_documents(documents)
-    print(f"[UPLOAD-MULTIPLE] RAG index created with {len(rag_index.chunks)} chunks "
+    print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks "
           f"(config: {rag_index.config})")
 
-    system = (
-        "You are an experienced debater. You will debate against a human user "
-        "on the topic of several provided documents. Take a clear stance "
-        "and defend it throughout the debate using evidence from the documents."
-    )
-    prompt = (
-        f"Here is the content of the documents:\n\n---\n{document_text[:8000]}\n---\n\n"
-        f"Read these documents, identify their common theme or points of disagreement, "
-        f"and generate an opening statement of 2-3 sentences where you take a position "
-        f"and invite the user to present their argument. "
-        f"Clearly state which position you are defending."
-    )
-    opening = call_luxia(prompt, system_instruction=system)
+    # Generate the AI's opening stance via RAG retrieval over the uploaded
+    # document(s), using the persona for the chosen difficulty.
+    opening_result = debate_agent.generate_opening_stance(rag_index, difficulty_cfg)
+    opening = opening_result["response"]
 
     faiss_cache[session_id] = rag_index
 
@@ -309,6 +269,7 @@ async def upload_multiple(
         "filename": files[0].filename,
         "filenames": [doc["filename"] for doc in documents],
         "document_text": document_text,
+        "difficulty": difficulty,
         "ai_position": opening,
         "history": [{"role": "ai", "text": opening}],
     }
@@ -317,6 +278,7 @@ async def upload_multiple(
     return {
         "session_id": session_id,
         "filenames": [doc["filename"] for doc in documents],
+        "difficulty": difficulty,
         "opening_statement": opening,
     }
 
@@ -329,6 +291,7 @@ async def debate(req: DebateRequest):
 
     # 1. Load session from DynamoDB
     session_data = load_session(req.session_id)
+    session_data["session_id"] = req.session_id
     if not session_data:
         raise HTTPException(
             status_code=404,
@@ -340,6 +303,7 @@ async def debate(req: DebateRequest):
 
     history = session_data.get("history", [])
     ai_position = session_data.get("ai_position", "")
+    difficulty_cfg = get_session_difficulty_cfg(session_data)
 
     # 3. Run the agent
     agent_result = debate_agent.process_turn(
@@ -347,6 +311,9 @@ async def debate(req: DebateRequest):
         history=history,
         rag_index=rag_index,
         ai_position=ai_position,
+        session_data=session_data,
+        feedback_fn=generate_session_feedback,
+        difficulty_cfg=difficulty_cfg,
     )
 
     ai_response = agent_result["response"]
@@ -360,15 +327,23 @@ async def debate(req: DebateRequest):
 
     print("[AGENT RESULT]", agent_result)
 
-    return {
-        "response": ai_response,
-        "audio_url": None,
-        "evidence": agent_result["evidence"],
-        "fallacy": agent_result["fallacy"],
-        "strategy": agent_result["strategy"],
-        "agent_actions": agent_result["agent_actions"],
-        "session_id": req.session_id,
-    }
+    response_body = {
+            "response": ai_response,
+            "audio_url": None,
+            "evidence": agent_result["evidence"],
+            "fallacy": agent_result["fallacy"],
+            "strategy": agent_result["strategy"],
+            "agent_decision": agent_result["agent_decision"],
+            "agent_reason": agent_result["agent_reason"],
+            "pipeline_steps": agent_result["pipeline_steps"],
+            "session_id": req.session_id,
+            "session_feedback": None,
+        }
+
+    if agent_result["agent_decision"] == "end_debate":
+        response_body["session_feedback"] = generate_session_feedback(session_data)
+
+    return response_body
 
 
 # Route 3: POST /end-session
@@ -416,6 +391,8 @@ Write feedback with the following sections:
 
 For each rating, provide a brief one-sentence justification.
 
+{feedback_focus}
+
 Guidelines:
 - Base all feedback strictly on the transcript.
 - Cite specific examples from the user's arguments.
@@ -437,52 +414,11 @@ Respond ONLY in valid JSON with this structure and nothing else:
 {{"user_score": <int 0-100>, "ai_score": <int 0-100>}}
 """
 
-
-@app.post("/end-session")
-async def end_session(req: EndSessionRequest):
+#decomment if we want to add a button to end the debate and get feedback in the frontend
+"""async def end_session(req: EndSessionRequest):
     print(f"[END-SESSION] Ending session: {req.session_id}")
-
     session_data = load_session(req.session_id)
-    if not session_data or not session_data.get("history"):
-        return {
-            "score": {"user": 0, "ai": 0},
-            "summary": "No debate to analyze.",
-            "transcript_url": None,
-        }
-
-    transcript = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
-        for msg in session_data["history"]
-    )
-
-    # 1. Detailed qualitative feedback (free-form prose)
-    feedback_prompt = FEEDBACK_PROMPT_TEMPLATE.format(transcript=transcript)
-    summary = call_luxia(feedback_prompt)
-
-    # 2. Separate numeric scoring (kept as its own JSON-only call for reliability)
-    score_prompt = SCORE_PROMPT_TEMPLATE.format(transcript=transcript)
-    raw_score = call_luxia(score_prompt)
-
-    cleaned = raw_score.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-
-    try:
-        data = json.loads(cleaned)
-        user_score = int(data.get("user_score", 50))
-        ai_score = int(data.get("ai_score", 50))
-    except (json.JSONDecodeError, ValueError):
-        print(f"[END-SESSION] Invalid score JSON received: {raw_score}")
-        user_score, ai_score = 50, 50
-
-    return {
-        "score": {"user": user_score, "ai": ai_score},
-        "summary": summary,
-        "transcript_url": None,
-    }
+    return generate_session_feedback(session_data)"""
 
 
 # Root route
@@ -494,4 +430,5 @@ async def root():
         "model": LUXIA_MODEL,
         "active_faiss_indexes": len(faiss_cache),
         "rag_mode": "FAISS + Luxia embeddings/chunking, sessions in DynamoDB",
+        "difficulty_levels": list(DIFFICULTY_CONFIG.keys()),
     }
