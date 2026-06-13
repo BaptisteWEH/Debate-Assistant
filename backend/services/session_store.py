@@ -48,6 +48,7 @@ def save_session(session_id: str, data: dict) -> None:
         "filenames": data.get("filenames", []),
         "document_text": data.get("document_text", ""),
         "ai_position": data.get("ai_position", ""),
+        "difficulty": data.get("difficulty", "medium"),  # add this line
         # L'historique est une liste, DynamoDB sait gérer ça nativement
         "history": data.get("history", []),
     }
