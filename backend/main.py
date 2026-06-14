@@ -89,14 +89,21 @@ class EndSessionRequest(BaseModel):
     session_id: str
 
 
-# ─── RAM cache for FAISS indexes ───────────────────────────────────────────────
+class SendReportRequest(BaseModel):
+    email: str
+    result: dict
+
+
+# ─── RAM cache for FAISS indexes + in-memory session fallback ─────────────────
 
 faiss_cache: dict[str, RAGIndex] = {}
+sessions: dict = {}           # fallback when DynamoDB credentials not available
+user_sessions: dict[str, list[str]] = {}  # user_id → [session_ids] fallback
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
-def call_luxia(prompt: str, system_instruction: str | None = None, retries: int = 5) -> str:
+def call_luxia(prompt: str, system_instruction: str | None = None, retries: int = 5, timeout: int = 30) -> str:
     full_prompt = f"{system_instruction}\n\n{prompt}" if system_instruction else prompt
     wait_time = 1.0
     for attempt in range(retries):
@@ -110,17 +117,19 @@ def call_luxia(prompt: str, system_instruction: str | None = None, retries: int 
                     "temperature": 0,
                     "stream": False,
                 },
-                timeout=30,
+                timeout=timeout,
             )
             if response.status_code == 429:
                 print(f"[LUXIA 429] sleeping {wait_time:.1f}s...")
                 time.sleep(wait_time + random.uniform(0, 0.5))
                 wait_time *= 2
                 continue
+            if not response.ok:
+                print(f"[LUXIA HTTP {response.status_code}] {response.text[:300]}")
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
-            print(f"[LUXIA ERROR] {e}")
+            print(f"[LUXIA ERROR] attempt={attempt+1} {e}")
             time.sleep(wait_time + random.uniform(0, 0.5))
             wait_time *= 2
     raise HTTPException(status_code=500, detail="Luxia error after retries")
@@ -150,10 +159,28 @@ def clean_text(text: str) -> str:
 
 
 def _persist_session(session_id: str, session: dict) -> None:
+    sessions[session_id] = session  # always keep in memory
+    user_id = session.get("user_id")
+    if user_id:
+        if user_id not in user_sessions:
+            user_sessions[user_id] = []
+        if session_id not in user_sessions[user_id]:
+            user_sessions[user_id].append(session_id)
     try:
         save_session(session_id, session)
     except Exception as e:
-        print(f"[DDB WARN] Could not persist session {session_id}: {e}")
+        print(f"[DDB WARN] Falling back to in-memory for session {session_id}: {e}")
+
+
+def _load_session(session_id: str) -> dict | None:
+    try:
+        data = load_session(session_id)
+        if data:
+            sessions[session_id] = data
+            return data
+    except Exception as e:
+        print(f"[DDB WARN] Falling back to in-memory for session {session_id}: {e}")
+    return sessions.get(session_id)
 
 
 def get_or_rebuild_rag_index(session_id: str, session_data: dict) -> RAGIndex:
@@ -280,7 +307,7 @@ async def upload(
 async def debate(req: DebateRequest):
     print(f"[DEBATE] session={req.session_id} msg={req.message[:80]}...")
 
-    session = load_session(req.session_id)
+    session = _load_session(req.session_id)
     if not session:
         raise HTTPException(
             status_code=404,
@@ -307,7 +334,11 @@ async def debate(req: DebateRequest):
 
     session_feedback = None
     if result.get("agent_decision") == "end_debate":
-        session_feedback = _build_end_session_feedback(session)
+        try:
+            session_feedback = _build_end_session_feedback(session)
+        except Exception as e:
+            print(f"[DEBATE END-FEEDBACK ERROR] {e}")
+            session_feedback = {"score": {"user": 50, "ai": 50}, "summary": "Debate complete, but detailed analysis is temporarily unavailable.", "dimensions": {}, "qualitative": {}}
 
     return {
         "response": result["response"],
@@ -337,10 +368,14 @@ async def transcribe(audio: UploadFile = File(...), session_id: str = Form(...))
 @app.post("/end-session")
 async def end_session(req: EndSessionRequest):
     print(f"[END-SESSION] session={req.session_id}")
-    session = load_session(req.session_id)
+    session = _load_session(req.session_id)
     if not session or not session.get("history"):
-        return {"score": {"user": 0, "ai": 0}, "summary": "No debate to analyse.", "transcript_url": None}
-    return _build_end_session_feedback(session)
+        return {"score": {"user": 0, "ai": 0}, "summary": "No debate to analyse.", "dimensions": {}, "qualitative": {}, "transcript_url": None}
+    try:
+        return _build_end_session_feedback(session)
+    except Exception as e:
+        print(f"[END-SESSION ERROR] {e}")
+        return {"score": {"user": 50, "ai": 50}, "summary": "Debate complete, but detailed analysis is temporarily unavailable.", "dimensions": {}, "qualitative": {}, "transcript_url": None}
 
 
 def _build_end_session_feedback(session: dict) -> dict:
@@ -349,18 +384,31 @@ def _build_end_session_feedback(session: dict) -> dict:
     scoring_criteria = LEVEL_PROMPTS.get(level_key, LEVEL_PROMPTS["easy"])["scoring"]
     _, difficulty_cfg = get_difficulty_config(level)
 
-    transcript = "\n".join(
+    all_turns = [
         f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
         for msg in session["history"]
-    )
+    ]
+    transcript = "\n".join(all_turns)
+    if len(transcript) > 3000:
+        # Keep most recent turns — they reflect the user's developed arguments
+        recent = []
+        chars = 0
+        for turn in reversed(all_turns):
+            if chars + len(turn) > 3000:
+                break
+            recent.insert(0, turn)
+            chars += len(turn)
+        transcript = "[Earlier turns omitted]\n" + "\n".join(recent)
     document_text = session.get("document_text", "")
 
     system = (
-        "You are an expert debate coach. Analyse the user's performance. "
+        "You are an expert debate coach evaluating the USER's performance only. "
+        "Every field in your response must describe the user — their arguments, their strengths, their weaknesses. "
+        "Never describe the AI's performance. "
         "Reply ONLY with valid JSON - no markdown, no explanation."
     )
     prompt = (
-        f"Reference document (excerpt):\n---\n{document_text[:2000]}...\n---\n\n"
+        f"Reference document (excerpt):\n---\n{document_text[:800]}...\n---\n\n"
         f"Full debate transcript:\n{transcript}\n\n"
         f"Difficulty level: {level.upper()}\n\n"
         f"Score the user based on these dimensions:\n{scoring_criteria}\n\n"
@@ -379,16 +427,16 @@ def _build_end_session_feedback(session: dict) -> dict:
         '    "rhetorical_depth": <0-100 or null>\n'
         '  },\n'
         '  "qualitative": {\n'
-        '    "strongest_argument": "<1-2 sentences>",\n'
-        '    "weakest_point": "<1-2 sentences>",\n'
-        '    "missed_opportunity": "<1-2 sentences>",\n'
-        '    "argument_pattern": "<1-2 sentences>",\n'
-        '    "ai_assessment": "<1-2 sentences>"\n'
+        '    "strongest_argument": "<quote the exact sentence or phrase the user said that was their strongest argument, then in one sentence explain why it was effective>",\n'
+        '    "weakest_point": "<1-2 sentences about where the user\'s reasoning was weakest>",\n'
+        '    "missed_opportunity": "<1-2 sentences about a strong counter the user could have made but didn\'t>",\n'
+        '    "argument_pattern": "<1-2 sentences about a recurring pattern or habit in how the user argues>",\n'
+        '    "ai_assessment": "<1-2 sentences giving an overall verdict on the user\'s debate performance and what they should work on next>"\n'
         '  }\n'
         "}"
     )
 
-    raw = call_luxia(prompt, system_instruction=system)
+    raw = call_luxia(prompt, system_instruction=system, timeout=90)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```")[1]
@@ -419,21 +467,73 @@ def _build_end_session_feedback(session: dict) -> dict:
     }
 
 
+# ─── POST /send-report ─────────────────────────────────────────────────────────
+
+@app.post("/send-report")
+async def send_report(req: SendReportRequest):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    sender = os.getenv("SMTP_EMAIL")
+    app_password = os.getenv("SMTP_APP_PASSWORD")
+    if not sender or not app_password:
+        raise HTTPException(status_code=500, detail="Email not configured.")
+
+    result = req.result
+    score = result.get("score", {})
+    dimensions = result.get("dimensions", {})
+    qualitative = result.get("qualitative", {})
+
+    dim_lines = "\n".join(
+        f"  {k.replace('_', ' ').title()}: {v}/100"
+        for k, v in dimensions.items() if v is not None
+    )
+
+    body = (
+        f"Your DebateCoach Report\n\n"
+        f"Score - You: {score.get('user', 0)}/100  |  AI: {score.get('ai', 0)}/100\n\n"
+        f"Summary:\n{result.get('summary', '')}\n\n"
+        f"Dimension Scores:\n{dim_lines}\n\n"
+        f"Strongest Argument:\n{qualitative.get('strongest_argument', '')}\n\n"
+        f"Weakest Point:\n{qualitative.get('weakest_point', '')}\n\n"
+        f"Missed Opportunity:\n{qualitative.get('missed_opportunity', '')}\n\n"
+        f"- DebateCoach\n"
+    )
+
+    msg = MIMEMultipart()
+    msg["From"] = sender
+    msg["To"] = req.email
+    msg["Subject"] = "Your DebateCoach Report"
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(sender, app_password)
+            server.send_message(msg)
+        return {"success": True}
+    except Exception as e:
+        print(f"[SEND-REPORT ERROR] {e}")
+        return {"success": False}
+
+
 # ─── GET /history/{user_id} ────────────────────────────────────────────────────
 
 @app.get("/history/{user_id}")
 async def get_history(user_id: str):
-    import boto3
-    from botocore.exceptions import ClientError
-    dynamodb = boto3.resource(
-        "dynamodb",
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
-    )
-    table = dynamodb.Table("DebateSessions")
+    # Try DynamoDB first
     try:
+        import boto3
+        from botocore.exceptions import ClientError
+        dynamodb = boto3.resource(
+            "dynamodb",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+        )
+        table = dynamodb.Table("DebateSessions")
         response = table.query(
             IndexName="user_id-created_at-index",
             KeyConditionExpression="user_id = :uid",
@@ -451,9 +551,23 @@ async def get_history(user_id: str):
             }
             for item in items
         ]
-    except ClientError as e:
-        print(f"[HISTORY ERROR] {e}")
-        raise HTTPException(status_code=500, detail="Could not fetch history.")
+    except Exception as e:
+        print(f"[HISTORY] DynamoDB unavailable, using in-memory fallback: {e}")
+
+    # In-memory fallback
+    session_ids = user_sessions.get(user_id, [])
+    result = []
+    for sid in reversed(session_ids):
+        s = sessions.get(sid)
+        if s:
+            result.append({
+                "session_id": sid,
+                "topic_summary": s.get("topic_summary", "Debate session"),
+                "created_at": s.get("created_at", ""),
+                "level": s.get("level", "easy"),
+                "filenames": s.get("filenames", []),
+            })
+    return result
 
 
 # ─── GET / ─────────────────────────────────────────────────────────────────────

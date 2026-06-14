@@ -36,6 +36,9 @@ frontend/next-env.d.ts
 Thumbs.db
 desktop.ini
 
+# ─── Local session file store (dev fallback for DynamoDB) ─
+backend/.sessions/
+
 # ─── Logs et fichiers temporaires ────────────────────────
 *.log
 npm-debug.log*

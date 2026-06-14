@@ -6,9 +6,12 @@ import requests
 import numpy as np
 import faiss
 
-LUXIA_API_KEY = os.getenv("LUXIA_API_KEY")
 EMBED_URL = "https://bridge.luxiacloud.com/luxia/v1/embedding"
 CHUNK_URL = "https://bridge.luxiacloud.com/luxia/v1/document-chunk"
+
+
+def _api_key() -> str:
+    return os.getenv("LUXIA_API_KEY", "")
 MAX_EMBED_CHARS = 4000
 EMBED_BATCH_SIZE = 32
 
@@ -31,7 +34,7 @@ def luxia_chunk(text: str, chunk_size: int, overlap: int) -> list[dict]:
     response = requests.post(
         CHUNK_URL,
         headers={
-            "apikey": LUXIA_API_KEY,
+            "apikey": _api_key(),
             "Content-Type": "application/json",
             "accept": "application/json",
         },
@@ -61,7 +64,7 @@ def embed_text(text: str, retries: int = 8) -> np.ndarray:
     for attempt in range(retries):
         response = requests.post(
             EMBED_URL,
-            headers={"apikey": LUXIA_API_KEY, "Content-Type": "application/json"},
+            headers={"apikey": _api_key(), "Content-Type": "application/json"},
             json={"inputs": [text]},
             timeout=60,
         )
@@ -89,7 +92,7 @@ def embed_texts_batch(texts: list[str], retries: int = 8) -> list[np.ndarray]:
     for attempt in range(retries):
         response = requests.post(
             EMBED_URL,
-            headers={"apikey": LUXIA_API_KEY, "Content-Type": "application/json"},
+            headers={"apikey": _api_key(), "Content-Type": "application/json"},
             json={"inputs": cleaned},
             timeout=120,
         )

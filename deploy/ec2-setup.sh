@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run this once on a fresh Ubuntu 22.04 EC2 instance.
+# Run this once on a fresh Ubuntu 22.04 EC2 instance (t3.micro works fine).
 # Usage: bash ec2-setup.sh
 
 set -e
