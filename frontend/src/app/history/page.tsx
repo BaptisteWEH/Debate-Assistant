@@ -114,9 +114,9 @@ export default function HistoryPage() {
                 </Link>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <Link href="/upload" style={{
-                        background: "var(--btn)", color: "var(--btn-fg)", fontSize: 13, fontWeight: 600,
+                        background: "#2563EB", color: "white", fontSize: 13, fontWeight: 600,
                         padding: "7px 16px", borderRadius: 9, textDecoration: "none",
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+                        boxShadow: "0 1px 3px rgba(37,99,235,0.3)",
                     }}
                         className="hover:opacity-85 transition-opacity">
                         New debate

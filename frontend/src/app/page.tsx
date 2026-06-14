@@ -202,8 +202,8 @@ export default function Home() {
                                     alignItems: "baseline",
                                 }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                                        <div style={{ width: 32, height: 32, background: "var(--subtle)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                                            <svg width="15" height="15" fill="none" stroke="var(--text-3)" strokeWidth="1.5" viewBox="0 0 24 24">
+                                        <div style={{ width: 32, height: 32, background: "#EFF6FF", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                            <svg width="15" height="15" fill="none" stroke="#2563EB" strokeWidth="1.5" viewBox="0 0 24 24">
                                                 <path strokeLinecap="round" strokeLinejoin="round" d={f.icon} />
                                             </svg>
                                         </div>

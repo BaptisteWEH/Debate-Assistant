@@ -230,11 +230,12 @@ export default function UploadPage() {
                                 key={l.id}
                                 onClick={() => setLevel(l.id)}
                                 style={{
-                                    flex: 1, padding: "9px 0", borderRadius: 7, border: "none", cursor: "pointer",
+                                    flex: 1, padding: "9px 0", borderRadius: 7, cursor: "pointer",
+                                    border: selected ? "1px solid #BFDBFE" : "1px solid transparent",
                                     fontSize: 14, fontWeight: selected ? 600 : 500,
-                                    background: selected ? "#08090A" : "transparent",
-                                    color: selected ? "white" : "#71717A",
-                                    boxShadow: selected ? "0 1px 3px rgba(0,0,0,0.2)" : "none",
+                                    background: selected ? "#D0E7FF" : "transparent",
+                                    color: selected ? "#1E3A5F" : "#71717A",
+                                    boxShadow: selected ? "0 1px 3px rgba(37,99,235,0.15)" : "none",
                                     transition: "all 0.15s", outline: "none",
                                 }}
                             >
@@ -246,9 +247,10 @@ export default function UploadPage() {
 
                 {/* Level detail panel */}
                 <div style={{
-                    background: "var(--card)", border: "1px solid var(--border)",
+                    background: "#EFF6FF", border: "1px solid #BFDBFE",
+                    borderLeft: "3px solid #2563EB",
                     borderRadius: 14, padding: "22px 24px", marginBottom: 40,
-                    boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+                    boxShadow: "0 1px 4px rgba(37,99,235,0.08)",
                     transition: "all 0.2s",
                 }}>
                     <div style={{ textAlign: "center", marginBottom: 16 }}>
@@ -283,8 +285,8 @@ export default function UploadPage() {
                         onDrop={handleDrop}
                         style={{
                             display: "block", cursor: "pointer",
-                            border: `1.5px dashed ${isDragging ? "var(--text-2)" : "var(--border)"}`,
-                            background: isDragging ? "var(--subtle)" : "white",
+                            border: `1.5px dashed ${isDragging ? "#2563EB" : "var(--border)"}`,
+                            background: isDragging ? "#EFF6FF" : "white",
                             borderRadius: 16, padding: "52px 24px", textAlign: "center",
                             transition: "all 0.15s", marginBottom: 32,
                             boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
@@ -348,7 +350,7 @@ export default function UploadPage() {
                     disabled={!file}
                     style={{
                         width: "100%",
-                        background: file ? "#09090B" : "var(--border)",
+                        background: file ? selectedLevel.accent : "var(--border)",
                         color: file ? "white" : "#A1A1AA",
                         border: "none",
                         borderRadius: 12, padding: "15px 24px",

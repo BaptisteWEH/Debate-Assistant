@@ -143,12 +143,13 @@ export default function SettingsPage() {
                                     key={l.id}
                                     onClick={() => handleLevelChange(l.id)}
                                     style={{
-                                        flex: 1, padding: "9px 0", borderRadius: 10, border: "none",
-                                        background: defaultLevel === l.id ? "var(--btn)" : "var(--subtle)",
-                                        color: defaultLevel === l.id ? "var(--btn-fg)" : "var(--text-3)",
+                                        flex: 1, padding: "9px 0", borderRadius: 10,
+                                        border: defaultLevel === l.id ? "1px solid #BFDBFE" : "1px solid transparent",
+                                        background: defaultLevel === l.id ? "#D0E7FF" : "var(--subtle)",
+                                        color: defaultLevel === l.id ? "#1E3A5F" : "var(--text-3)",
                                         fontSize: 13, fontWeight: defaultLevel === l.id ? 600 : 400,
                                         cursor: "pointer", transition: "all 0.15s",
-                                        boxShadow: defaultLevel === l.id ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                                        boxShadow: defaultLevel === l.id ? "0 1px 3px rgba(37,99,235,0.15)" : "none",
                                     }}
                                 >
                                     {l.label}

@@ -72,10 +72,10 @@ const QUAL_CARDS = [
     },
 ];
 
-const LEVEL_CONFIG: Record<string, { label: string }> = {
-    easy:         { label: "Easy" },
-    intermediate: { label: "Intermediate" },
-    hard:         { label: "Hard" },
+const LEVEL_CONFIG: Record<string, { label: string; color: string; bg: string; border: string }> = {
+    easy:         { label: "Easy",         color: "#16A34A", bg: "#F0FDF4", border: "#BBF7D0" },
+    intermediate: { label: "Intermediate", color: "#2563EB", bg: "#EFF6FF", border: "#BFDBFE" },
+    hard:         { label: "Hard",         color: "#DC2626", bg: "#FFF1F2", border: "#FECDD3" },
 };
 
 function ScoreRing({ score, size = 148, strokeWidth = 10, animate }: {
@@ -174,12 +174,12 @@ export default function ResultPage() {
     const levelCfg = result ? (LEVEL_CONFIG[result.level] ?? { label: result.level }) : null;
     const scoredDimensions = DIMENSIONS.filter((d) => result?.dimensions?.[d.key] != null);
 
-    const getGrade = (score: number) => {
-        if (score >= 90) return "Outstanding";
-        if (score >= 80) return "Excellent";
-        if (score >= 70) return "Good";
-        if (score >= 60) return "Developing";
-        return "Needs work";
+    const getGrade = (score: number): { label: string; color: string; bg: string; border: string } => {
+        if (score >= 90) return { label: "Outstanding",  color: "#16A34A", bg: "#F0FDF4", border: "#BBF7D0" };
+        if (score >= 80) return { label: "Excellent",    color: "#2563EB", bg: "#EFF6FF", border: "#BFDBFE" };
+        if (score >= 70) return { label: "Good",         color: "#7C3AED", bg: "#F5F3FF", border: "#DDD6FE" };
+        if (score >= 60) return { label: "Developing",   color: "#D97706", bg: "#FFFBEB", border: "#FDE68A" };
+        return                  { label: "Needs work",   color: "#DC2626", bg: "#FFF1F2", border: "#FECDD3" };
     };
 
     return (
@@ -235,17 +235,19 @@ export default function ResultPage() {
                         {result ? (
                             <>
                                 <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
-                                    <span style={{
-                                        fontSize: 12, fontWeight: 600, color: "var(--text-2)",
-                                        background: "var(--subtle)", border: "1px solid var(--border)",
-                                        borderRadius: 999, padding: "4px 14px",
-                                    }}>
-                                        {getGrade(result.user_score)}
-                                    </span>
+                                    {(() => { const g = getGrade(result.user_score); return (
+                                        <span style={{
+                                            fontSize: 12, fontWeight: 600, color: g.color,
+                                            background: g.bg, border: `1px solid ${g.border}`,
+                                            borderRadius: 999, padding: "4px 14px",
+                                        }}>
+                                            {g.label}
+                                        </span>
+                                    ); })()}
                                     {levelCfg && (
                                         <span style={{
-                                            fontSize: 12, fontWeight: 600, color: "var(--text-3)",
-                                            background: "var(--subtle)", border: "1px solid var(--border)",
+                                            fontSize: 12, fontWeight: 600, color: levelCfg.color,
+                                            background: levelCfg.bg, border: `1px solid ${levelCfg.border}`,
                                             borderRadius: 999, padding: "4px 14px",
                                         }}>
                                             {levelCfg.label}

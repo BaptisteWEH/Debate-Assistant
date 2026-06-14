@@ -474,10 +474,10 @@ function DebatePageInner() {
                                             </p>
                                         ) : (
                                             <div style={{
-                                                background: "var(--subtle)",
+                                                background: "#D0E7FF",
                                                 borderRadius: 18,
                                                 padding: "12px 18px",
-                                                fontSize: 15, lineHeight: 1.7, color: "var(--text)",
+                                                fontSize: 15, lineHeight: 1.7, color: "#1E3A5F",
                                                 maxWidth: "80%",
                                                 wordBreak: "break-word", overflowWrap: "break-word",
                                             }}>

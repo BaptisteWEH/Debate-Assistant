@@ -446,12 +446,12 @@ def _build_end_session_feedback(session: dict) -> dict:
 
     try:
         data = json.loads(cleaned)
-        user_score = int(data.get("user_score", 0))
-        ai_score = int(data.get("ai_score", 0))
+        user_score = int(data.get("user_score") or 0)
+        ai_score = int(data.get("ai_score") or 0)
         summary = data.get("summary", "Analysis unavailable.")
         dimensions = data.get("dimensions", {})
         qualitative = data.get("qualitative", {})
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, TypeError):
         print(f"[END-SESSION] Invalid JSON from Luxia: {raw}")
         user_score, ai_score = 50, 50
         summary = "The debate went well, but the detailed analysis could not be generated."
