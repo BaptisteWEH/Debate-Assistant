@@ -251,7 +251,7 @@ export default function RubricPage() {
 														{active ? (
 															<span className="text-gray-700 text-base">✓</span>
 														) : (
-															<span className="text-gray-300">—</span>
+															<span className="text-gray-300">-</span>
 														)}
 													</td>
 												);
@@ -271,7 +271,7 @@ export default function RubricPage() {
 						>
 							Start a session
 						</Link>
-						{/* Temporary preview link — remove before shipping */}
+						{/* Temporary preview link - remove before shipping */}
 						<Link
 							href="/result"
 							className="text-xs text-gray-400 border border-dashed border-gray-300 px-4 py-1.5 rounded-full hover:text-gray-600 hover:border-gray-400 transition-colors"

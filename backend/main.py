@@ -1,44 +1,31 @@
-"""
-DebateCoach — Backend (étape 3a : RAG naïf)
-
-Le PDF uploadé est maintenant LU : son texte est extrait avec pypdf, stocké
-dans la session, et injecté en entier dans les prompts Gemini.
-
-L'IA s'appuie maintenant vraiment sur le contenu du document, pas juste sur
-le nom du fichier. La route /debate renvoie aussi quelques extraits comme
-"evidence" affichable dans le panneau gauche du frontend.
-
-Limitation connue : pour des très gros documents (> ~100 pages), on dépassera
-la fenêtre de contexte de Gemini. L'étape 3b (FAISS) règlera ça.
-"""
-
 import os
 import io
 import json
+import requests
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import google.generativeai as genai
 from pypdf import PdfReader
 
-
-# ─── Chargement de la configuration ────────────────────────────────────────────
+from services.rag_service import RAGIndex
+from services.agent_service import DebateAgent
+from services.session_store import save_session, load_session
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+LUXIA_API_KEY = os.getenv("LUXIA_API_KEY")
+if not LUXIA_API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY introuvable. Vérifie que le fichier .env existe "
-        "et contient bien la variable GEMINI_API_KEY."
+        "LUXIA_API_KEY not found. Make sure backend/.env exists and contains LUXIA_API_KEY."
     )
 
-genai.configure(api_key=GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+LUXIA_URL   = "https://bridge.luxiacloud.com/luxia/v1/chat"
+LUXIA_MODEL = "luxia3-llm-32b-0731"
+AGENT_MODEL = "luxia3-llm-8b-0731"
 
 
-# ─── Application FastAPI ───────────────────────────────────────────────────────
+# ─── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="DebateCoach Backend")
 
@@ -50,80 +37,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ─── Fonction helper : call_gemini ─────────────────────────────────────────────
-
-def call_gemini(prompt: str, system_instruction: str | None = None) -> str:
-    """Appelle Gemini et retourne le texte généré."""
-    try:
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system_instruction,
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"[GEMINI ERROR] {e}")
-        raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
+agent = DebateAgent(luxia_api_key=LUXIA_API_KEY, model_name=AGENT_MODEL)
 
 
-# ─── Fonction helper : extraction du texte d'un PDF ────────────────────────────
+# ─── Level-specific prompts (based on rubric) ──────────────────────────────────
 
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """
-    Prend les bytes d'un fichier PDF et retourne tout son texte en une seule
-    chaîne. Si l'extraction échoue, retourne une chaîne vide.
-    """
-    try:
-        # PdfReader veut un objet "file-like", on enveloppe les bytes dans BytesIO
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages_text = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            pages_text.append(text.strip())
-        full_text = "\n\n".join(pages_text)
-        return full_text
-    except Exception as e:
-        print(f"[PDF EXTRACT ERROR] {e}")
-        return ""
+LEVEL_PROMPTS = {
+    "easy": {
+        "opening": (
+            "You are a Supportive Guide helping a student practice debating. "
+            "Use simple vocabulary. Take a clear position on the document's thesis "
+            "and invite the user to respond. Be encouraging and accessible. "
+            "Keep your opening to 2-3 sentences."
+        ),
+        "debate": (
+            "You are a Supportive Guide. Use simple vocabulary. "
+            "Ask exactly ONE question per response to help the user develop their thinking. "
+            "Do NOT introduce counter-arguments — focus on helping the user articulate "
+            "and strengthen their own position. Respond in 2-3 sentences. "
+            "Reference the document where helpful."
+        ),
+        "scoring": (
+            "Evaluate the user on these THREE dimensions only:\n"
+            "- Claim Clarity (35%): how precisely they stated their position\n"
+            "- Evidence Integration (35%): whether they cited the document\n"
+            "- Logical Structure (30%): whether their argument was coherent\n"
+        ),
+    },
+    "intermediate": {
+        "opening": (
+            "You are an Analytical Challenger. Take the strongest position "
+            "FOR or AGAINST the document's thesis and signal that you will "
+            "challenge the user's reasoning. Keep your opening to 2-3 sentences."
+        ),
+        "debate": (
+            "You are an Analytical Challenger. Introduce counter-arguments that "
+            "directly test the user's reasoning. Expect them to engage with your "
+            "opposing claims rather than simply restating their position. "
+            "Respond in 2-4 sentences. Draw on the reference document."
+        ),
+        "scoring": (
+            "Evaluate the user on these FIVE dimensions:\n"
+            "- Claim Clarity (20%): how precisely they stated their position\n"
+            "- Evidence Integration (20%): whether they cited the document\n"
+            "- Logical Structure (20%): whether their argument was coherent\n"
+            "- Rebuttal Quality (25%): how effectively they countered the AI's specific claims\n"
+            "- Consistency (15%): whether their position stayed coherent across rounds\n"
+        ),
+    },
+    "hard": {
+        "opening": (
+            "You are a Rigorous Adversary. Take the strongest possible position "
+            "on the document's thesis. Make clear you will hold the user to the "
+            "highest standard of argumentation with no concessions. 2-3 sentences."
+        ),
+        "debate": (
+            "You are a Rigorous Adversary. Use the document as a weapon — find "
+            "passages that contradict the user's claims. Exploit vague language, "
+            "logical gaps, and inconsistencies without concession. Demand rhetorical "
+            "precision. Never concede unless the user's argument is airtight. "
+            "Respond in 2-4 sentences. Be direct and unrelenting."
+        ),
+        "scoring": (
+            "Evaluate the user on these SIX dimensions:\n"
+            "- Claim Clarity (15%): how precisely they stated their position\n"
+            "- Evidence Integration (15%): whether they cited specific document passages\n"
+            "- Logical Structure (15%): whether their argument followed coherent cause-and-effect reasoning\n"
+            "- Rebuttal Quality (20%): how effectively they countered the AI's specific claims\n"
+            "- Consistency (15%): whether their position stayed coherent across all rounds\n"
+            "- Rhetorical Depth (20%): sophistication of persuasion — analogy, ethos, pathos, rhetorical register\n"
+        ),
+    },
+}
 
 
-def make_evidence_snippets(text: str, max_snippets: int = 3) -> list[dict]:
-    """
-    Découpe le texte en quelques extraits courts pour le panneau Evidence.
-    Version naïve : on prend des chunks fixes du début, milieu, fin du document.
-    L'étape 3b remplacera ça par une vraie recherche sémantique.
-    """
-    if not text:
-        return []
-
-    chunk_size = 400  # ~400 caractères par snippet
-    total = len(text)
-
-    if total < chunk_size:
-        return [{
-            "id": "chunk-1",
-            "page": 1,
-            "text": text.strip(),
-            "score": 1.0,
-        }]
-
-    # On prend des extraits espacés dans le document
-    positions = [0, total // 2, max(0, total - chunk_size)]
-    snippets = []
-    for i, pos in enumerate(positions[:max_snippets]):
-        excerpt = text[pos:pos + chunk_size].strip()
-        if excerpt:
-            snippets.append({
-                "id": f"chunk-{i+1}",
-                "page": (pos // 2000) + 1,  # approximation page
-                "text": excerpt,
-                "score": round(0.9 - i * 0.1, 2),
-            })
-    return snippets
-
-
-# ─── Schémas Pydantic ──────────────────────────────────────────────────────────
+# ─── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class DebateRequest(BaseModel):
     message: str
@@ -134,165 +122,274 @@ class EndSessionRequest(BaseModel):
     session_id: str
 
 
-# ─── Mémoire de session ────────────────────────────────────────────────────────
+# ─── In-memory session store ───────────────────────────────────────────────────
+# RAGIndex (FAISS) cannot be serialised to DynamoDB, so we always keep it here.
+# DynamoDB is used for durable metadata (history, positions, filenames).
 
 sessions: dict[str, dict] = {}
 
 
-# ─── Route 1 : POST /upload ────────────────────────────────────────────────────
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def call_luxia(prompt: str, system_instruction: str | None = None) -> str:
+    messages = []
+    if system_instruction:
+        full_prompt = f"{system_instruction}\n\n{prompt}"
+        messages.append({"role": "user", "content": full_prompt})
+    else:
+        messages.append({"role": "user", "content": prompt})
+
+    try:
+        response = requests.post(
+            LUXIA_URL,
+            headers={"apikey": LUXIA_API_KEY, "Content-Type": "application/json"},
+            json={"model": LUXIA_MODEL, "messages": messages},
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.RequestException as e:
+        print(f"[LUXIA ERROR] {e}")
+        raise HTTPException(status_code=500, detail=f"Luxia error: {str(e)}")
+    except (KeyError, IndexError) as e:
+        print(f"[LUXIA PARSE ERROR] {e}")
+        raise HTTPException(status_code=500, detail="Unexpected response format from Luxia.")
+
+
+def extract_pdf_pages(pdf_bytes: bytes, filename: str) -> list[dict]:
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages = []
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append({"page_num": i + 1, "text": text.strip()})
+        return pages
+    except Exception as e:
+        print(f"[PDF ERROR] {filename}: {e}")
+        return []
+
+
+def _persist_session(session_id: str, session: dict) -> None:
+    try:
+        save_session(session_id, session)
+    except Exception as e:
+        print(f"[DDB WARN] Could not persist session {session_id}: {e}")
+
+
+def generate_feedback(session_data: dict) -> dict:
+    """Quick feedback payload used for email sending mid-debate."""
+    return {
+        "score": {"user": 0, "ai": 0},
+        "summary": "Your full results will be available when you end the debate session.",
+    }
+
+
+# ─── POST /upload ──────────────────────────────────────────────────────────────
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[UPLOAD] Reçu : {file.filename} (session : {session_id})")
+async def upload(
+    session_id: str = Form(...),
+    level: str = Form("easy"),
+    # Accept single 'file' (legacy) or up to 5 named files
+    file:  UploadFile = File(None),
+    file1: UploadFile = File(None),
+    file2: UploadFile = File(None),
+    file3: UploadFile = File(None),
+    file4: UploadFile = File(None),
+    file5: UploadFile = File(None),
+):
+    level = level if level in LEVEL_PROMPTS else "easy"
 
-    # Lire les bytes du fichier
-    pdf_bytes = await file.read()
+    # Collect whichever files were sent
+    raw_files = [f for f in [file, file1, file2, file3, file4, file5] if f is not None]
+    if not raw_files:
+        raise HTTPException(status_code=400, detail="At least one PDF file is required.")
 
-    # Extraire le texte du PDF
-    document_text = extract_pdf_text(pdf_bytes)
+    print(f"[UPLOAD] session={session_id}  level={level}  files={[f.filename for f in raw_files]}")
 
-    if not document_text:
+    documents = []
+    all_text_parts = []
+    filenames = []
+
+    for f in raw_files:
+        pdf_bytes = await f.read()
+        pages = extract_pdf_pages(pdf_bytes, f.filename)
+        if pages:
+            documents.append({"filename": f.filename, "pages": pages})
+            all_text_parts.append("\n\n".join(p["text"] for p in pages))
+            filenames.append(f.filename)
+
+    if not documents:
         raise HTTPException(
             status_code=400,
-            detail="Impossible d'extraire le texte de ce PDF. "
-                   "Est-il bien un PDF avec du texte (pas une image scannée) ?"
+            detail="Could not extract text from any of the uploaded PDFs. Make sure they contain selectable text.",
         )
 
-    print(f"[UPLOAD] Texte extrait : {len(document_text)} caractères")
+    all_text = "\n\n".join(all_text_parts)
 
-    # Demander à Gemini une position d'ouverture, basée sur le VRAI contenu
-    system = (
-        "Tu es un débatteur expérimenté. Tu vas débattre contre un utilisateur "
-        "humain sur le sujet d'un document qu'il vient de fournir. Tu prends "
-        "une position claire (POUR ou CONTRE la thèse du document, à toi de choisir) "
-        "et tu la défendras tout au long du débat en t'appuyant sur le document."
-    )
+    # Build FAISS RAG index
+    rag_index = None
+    try:
+        rag_index = RAGIndex.from_pages_documents(documents)
+        print(f"[UPLOAD] RAG index built with {len(rag_index.chunks)} chunks")
+        context_chunks = rag_index.search("main thesis argument position", top_k=3)
+        context = "\n\n---\n\n".join(c["text"] for c in context_chunks)
+    except Exception as e:
+        print(f"[RAG WARN] FAISS build failed ({e}), falling back to naive context")
+        context = all_text[:3000]
 
     prompt = (
-        f"Voici le contenu du document :\n\n---\n{document_text}\n---\n\n"
-        f"Lis ce document, identifie sa thèse principale, et génère une phrase "
-        f"d'ouverture (2-3 phrases) où tu prends position et invites l'utilisateur "
-        f"à présenter son argument. Indique clairement quelle position tu défends."
+        f"Here is context from the document(s):\n\n---\n{context}\n---\n\n"
+        "Read the document, identify its main thesis, and write an opening "
+        "statement where you take a clear position and invite the user to "
+        "present their argument. State your position explicitly."
     )
 
-    opening = call_gemini(prompt, system_instruction=system)
+    opening = call_luxia(prompt, system_instruction=LEVEL_PROMPTS[level]["opening"])
 
-    # Stocker tout dans la session
     sessions[session_id] = {
-        "filename": file.filename,
-        "document_text": document_text,
-        "ai_position": opening,
-        "history": [
-            {"role": "ai", "text": opening}
-        ],
-    }
-
-    return {
         "session_id": session_id,
-        "opening_statement": opening,
+        "filename": filenames[0] if filenames else "",
+        "filenames": filenames,
+        "document_text": all_text,
+        "level": level,
+        "ai_position": opening,
+        "history": [{"role": "ai", "text": opening}],
+        "rag_index": rag_index,
     }
 
+    _persist_session(session_id, sessions[session_id])
 
-# ─── Route 2 : POST /debate ────────────────────────────────────────────────────
+    return {"session_id": session_id, "opening_statement": opening}
+
+
+# ─── POST /debate ──────────────────────────────────────────────────────────────
 
 @app.post("/debate")
 async def debate(req: DebateRequest):
-    print(f"[DEBATE] Message reçu : {req.message[:80]}...")
+    print(f"[DEBATE] session={req.session_id}  msg={req.message[:80]}...")
 
     session = sessions.get(req.session_id)
     if not session:
-        raise HTTPException(
-            status_code=404,
-            detail="Session introuvable. As-tu bien uploadé un document d'abord ?"
-        )
+        # Attempt recovery from DynamoDB (RAGIndex will be missing)
+        stored = load_session(req.session_id)
+        if not stored:
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found. Did you upload a document first?",
+            )
+        stored["rag_index"] = None
+        sessions[req.session_id] = stored
+        session = stored
 
-    document_text = session.get("document_text", "")
-    history_text = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'} : {msg['text']}"
-        for msg in session["history"]
+    result = agent.process_turn(
+        user_message=req.message,
+        history=session["history"],
+        rag_index=session.get("rag_index"),
+        ai_position=session["ai_position"],
+        session_data=session,
+        feedback_fn=generate_feedback,
     )
-
-    system = (
-        "Tu es un débatteur exigeant mais juste. Tu défends la position prise "
-        "au début du débat. Tu réponds en 2-4 phrases maximum, de manière "
-        "conversationnelle. Tu DOIS t'appuyer sur le contenu du document fourni "
-        "pour étayer tes arguments. Si l'utilisateur commet une erreur logique "
-        "évidente (ex : ad hominem, faux dilemme), signale-la avec respect."
-    )
-
-    prompt = (
-        f"Contenu du document de référence :\n---\n{document_text}\n---\n\n"
-        f"Historique du débat :\n{history_text}\n\n"
-        f"L'utilisateur vient de dire : « {req.message} »\n\n"
-        f"Réponds en défendant ta position et en t'appuyant sur le document."
-    )
-
-    ai_response = call_gemini(prompt, system_instruction=system)
 
     session["history"].append({"role": "user", "text": req.message})
-    session["history"].append({"role": "ai", "text": ai_response})
+    session["history"].append({"role": "ai",   "text": result["response"]})
 
-    # Générer quelques snippets factices pour le panneau Evidence
-    evidence = make_evidence_snippets(document_text, max_snippets=3)
+    _persist_session(req.session_id, session)
+
+    # If agent decided to end the debate, include session feedback in response
+    session_feedback = None
+    if result.get("agent_decision") == "end_debate":
+        session_feedback = _build_end_session_feedback(session)
 
     return {
-        "response": ai_response,
-        "audio_url": None,
-        "evidence": evidence,
-        "session_id": req.session_id,
+        "response":        result["response"],
+        "audio_url":       None,
+        "evidence":        result.get("evidence", []),
+        "fallacy":         result.get("fallacy", {}),
+        "agent_decision":  result.get("agent_decision", "continue_debate"),
+        "session_id":      req.session_id,
+        "session_feedback": session_feedback,
     }
 
 
-# ─── Route 3 : POST /transcribe (toujours factice) ─────────────────────────────
+# ─── POST /transcribe ──────────────────────────────────────────────────────────
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...), session_id: str = Form(...)):
-    print(f"[TRANSCRIBE] Audio reçu (session : {session_id}) — factice pour l'instant")
+    print(f"[TRANSCRIBE] session={session_id} — stub, AWS Transcribe planned for step 4")
     return {
-        "transcript": "Ceci est un texte transcrit factice. AWS Transcribe viendra à l'étape 4."
+        "transcript": "This is a placeholder transcript. AWS Transcribe will replace this in step 4."
     }
 
 
-# ─── Route 4 : POST /end-session ───────────────────────────────────────────────
+# ─── POST /end-session ─────────────────────────────────────────────────────────
 
 @app.post("/end-session")
 async def end_session(req: EndSessionRequest):
-    print(f"[END-SESSION] Fin de session : {req.session_id}")
+    print(f"[END-SESSION] session={req.session_id}")
 
     session = sessions.get(req.session_id)
-    if not session or not session["history"]:
-        return {
-            "score": {"user": 0, "ai": 0},
-            "summary": "Aucun débat à analyser.",
-            "transcript_url": None,
-        }
+    if not session:
+        stored = load_session(req.session_id)
+        if not stored:
+            return {"score": {"user": 0, "ai": 0}, "summary": "No debate to analyse.", "transcript_url": None}
+        stored["rag_index"] = None
+        sessions[req.session_id] = stored
+        session = stored
 
-    document_text = session.get("document_text", "")
+    if not session.get("history"):
+        return {"score": {"user": 0, "ai": 0}, "summary": "No debate to analyse.", "transcript_url": None}
+
+    return _build_end_session_feedback(session)
+
+
+def _build_end_session_feedback(session: dict) -> dict:
+    """Call Luxia to score the debate and return the rich feedback payload."""
+    level = session.get("level", "easy")
     transcript = "\n".join(
-        f"{'AI' if msg['role'] == 'ai' else 'User'} : {msg['text']}"
+        f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
         for msg in session["history"]
     )
+    document_text = session.get("document_text", "")
+    scoring_criteria = LEVEL_PROMPTS[level]["scoring"]
 
     system = (
-        "Tu es un coach de débat expert. Tu analyses la performance d'un "
-        "utilisateur dans un débat contre une IA, sur un sujet défini par un "
-        "document de référence. Tu réponds UNIQUEMENT au format JSON valide, "
-        "avec cette structure : "
-        '{"user_score": <0-100>, "ai_score": <0-100>, "summary": "<texte>"}'
+        "You are an expert debate coach. Analyse the user's performance. "
+        "Reply ONLY with valid JSON — no markdown, no explanation."
     )
 
     prompt = (
-        f"Document de référence (résumé) :\n---\n{document_text[:2000]}...\n---\n\n"
-        f"Transcript complet du débat :\n{transcript}\n\n"
-        f"Évalue la performance de l'utilisateur (User) sur 100 et celle de "
-        f"l'IA (AI) sur 100. Donne un résumé (2-3 phrases) avec des conseils "
-        f"concrets pour aider l'utilisateur à progresser. Évalue notamment si "
-        f"l'utilisateur s'est bien appuyé sur le document. Réponds en JSON valide."
+        f"Reference document (excerpt):\n---\n{document_text[:2000]}...\n---\n\n"
+        f"Full debate transcript:\n{transcript}\n\n"
+        f"Difficulty level: {level.upper()}\n\n"
+        f"Score the user based on these dimensions:\n{scoring_criteria}\n\n"
+        "Reply ONLY with this exact JSON structure:\n"
+        "{\n"
+        '  "user_score": <overall 0-100 weighted by dimension weights>,\n'
+        '  "ai_score": <overall 0-100>,\n'
+        '  "summary": "<2-3 sentences with concrete tips for improvement>",\n'
+        '  "dimensions": {\n'
+        '    "claim_clarity": <0-100 or null if not scored at this level>,\n'
+        '    "evidence_integration": <0-100 or null>,\n'
+        '    "logical_structure": <0-100 or null>,\n'
+        '    "rebuttal_quality": <0-100 or null>,\n'
+        '    "consistency": <0-100 or null>,\n'
+        '    "rhetorical_depth": <0-100 or null>\n'
+        '  },\n'
+        '  "qualitative": {\n'
+        '    "strongest_argument": "<1-2 sentences identifying the user\'s best argument>",\n'
+        '    "weakest_point": "<1-2 sentences identifying their biggest weakness>",\n'
+        '    "missed_opportunity": "<1-2 sentences on what they could have said but didn\'t>",\n'
+        '    "argument_pattern": "<1-2 sentences describing a recurring pattern in their argumentation>",\n'
+        '    "ai_assessment": "<1-2 sentences on the overall strength of the user\'s position>"\n'
+        '  }\n'
+        "}"
     )
 
-    raw_response = call_gemini(prompt, system_instruction=system)
+    raw = call_luxia(prompt, system_instruction=system)
 
-    cleaned = raw_response.strip()
+    cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```")[1]
         if cleaned.startswith("json"):
@@ -300,29 +397,36 @@ async def end_session(req: EndSessionRequest):
         cleaned = cleaned.strip()
 
     try:
-        data = json.loads(cleaned)
-        user_score = int(data.get("user_score", 0))
-        ai_score = int(data.get("ai_score", 0))
-        summary = data.get("summary", "Analyse indisponible.")
+        data        = json.loads(cleaned)
+        user_score  = int(data.get("user_score", 0))
+        ai_score    = int(data.get("ai_score", 0))
+        summary     = data.get("summary", "Analysis unavailable.")
+        dimensions  = data.get("dimensions", {})
+        qualitative = data.get("qualitative", {})
     except (json.JSONDecodeError, ValueError):
-        print(f"[END-SESSION] JSON invalide reçu de Gemini : {raw_response}")
+        print(f"[END-SESSION] Invalid JSON from Luxia: {raw}")
         user_score, ai_score = 50, 50
-        summary = "Le débat s'est bien déroulé, mais l'analyse détaillée n'a pas pu être générée."
+        summary     = "The debate went well, but the detailed analysis could not be generated."
+        dimensions  = {}
+        qualitative = {}
 
     return {
-        "score": {"user": user_score, "ai": ai_score},
-        "summary": summary,
+        "score":          {"user": user_score, "ai": ai_score},
+        "summary":        summary,
+        "dimensions":     dimensions,
+        "qualitative":    qualitative,
         "transcript_url": None,
     }
 
 
-# ─── Route racine ──────────────────────────────────────────────────────────────
+# ─── GET / ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
     return {
-        "status": "DebateCoach backend is running",
-        "model": GEMINI_MODEL,
+        "status":          "DebateCoach backend is running",
+        "model":           LUXIA_MODEL,
+        "agent_model":     AGENT_MODEL,
         "active_sessions": len(sessions),
-        "rag_mode": "naive (full document in prompt)",
+        "rag_mode":        "FAISS (semantic retrieval with Luxia embeddings)",
     }
