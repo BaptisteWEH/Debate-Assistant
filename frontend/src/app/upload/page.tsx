@@ -48,7 +48,7 @@ export default function UploadPage() {
         const sessionId = crypto.randomUUID();
 
         const form = new FormData();
-        form.append("file", file);
+        form.append("file1", file);
         form.append("session_id", sessionId);
 
         try {

@@ -15,6 +15,11 @@ from pypdf import PdfReader
 from services.rag_service import RAGIndex
 from services.agent_service import DebateAgent, DIFFICULTY_CONFIG, get_difficulty_config
 from services.session_store import save_session, load_session
+from services.file_store import (
+    upload_pdf,
+    upload_faiss_index,
+    download_faiss_index,
+)
 
 
 # Configuration loading
@@ -138,12 +143,28 @@ faiss_cache: dict[str, RAGIndex] = {}
 def get_or_rebuild_rag_index(session_id: str, session_data: dict) -> RAGIndex:
     """
     Returns the FAISS index for this session.
-    Rebuilds from document_text if not in cache (e.g. after server restart).
+
+    Lookup order:
+    1. RAM cache (fastest, free)
+    2. S3 (slower but avoids re-embedding the whole document)
+    3. Rebuild from document_text in DynamoDB (last resort, costs Luxia calls)
     """
+    # 1. RAM cache hit: return immediately
     if session_id in faiss_cache:
         return faiss_cache[session_id]
 
-    print(f"[FAISS CACHE MISS] Rebuilding index for session {session_id}")
+    # 2. Try to download the saved index from S3
+    print(f"[FAISS CACHE MISS] Trying to reload index from S3 for session {session_id}")
+    try:
+        rag_index = download_faiss_index(session_id)
+        if rag_index is not None:
+            faiss_cache[session_id] = rag_index
+            return rag_index
+    except Exception as e:
+        print(f"[S3 RELOAD WARNING] Could not reload from S3, will rebuild. Reason: {e}")
+
+    # 3. Last resort: rebuild the index from document_text stored in DynamoDB
+    print(f"[FAISS REBUILD] Rebuilding index from document_text for session {session_id}")
     document_text = session_data.get("document_text", "")
     if not document_text:
         raise HTTPException(
@@ -159,6 +180,13 @@ def get_or_rebuild_rag_index(session_id: str, session_data: dict) -> RAGIndex:
         }
     ])
     faiss_cache[session_id] = rag_index
+
+    # Save the freshly rebuilt index back to S3 so we don't redo this work
+    try:
+        upload_faiss_index(session_id, rag_index)
+    except Exception as e:
+        print(f"[S3 SAVE WARNING] Could not save rebuilt index to S3: {e}")
+
     return rag_index
 
 
@@ -247,6 +275,13 @@ async def upload(
     for file in files:
         print(f"[UPLOAD] Reading: {file.filename}")
         pdf_bytes = await file.read()
+
+        # Persist the original PDF in S3 (archive + fallback)
+        try:
+            upload_pdf(session_id, file.filename, pdf_bytes)
+        except Exception as e:
+            print(f"[S3 SAVE WARNING] Could not save PDF to S3: {e}")
+
         pages = extract_pdf_pages(pdf_bytes)
         for p in pages:
             p["text"] = clean_text(p["text"])
@@ -267,6 +302,12 @@ async def upload(
     rag_index = RAGIndex.from_pages_documents(documents)
     print(f"[UPLOAD] RAG index created with {len(rag_index.chunks)} chunks "
           f"(config: {rag_index.config})")
+
+    # Persist the FAISS index in S3 so we can reload it without re-embedding
+    try:
+        upload_faiss_index(session_id, rag_index)
+    except Exception as e:
+        print(f"[S3 SAVE WARNING] Could not save FAISS index to S3: {e}")
 
     # Generate the AI's opening stance via RAG retrieval over the uploaded
     # document(s), using the persona for the chosen difficulty.
@@ -439,6 +480,6 @@ async def root():
         "status": "DebateCoach backend is running",
         "model": LUXIA_MODEL,
         "active_faiss_indexes": len(faiss_cache),
-        "rag_mode": "FAISS + Luxia embeddings/chunking, sessions in DynamoDB",
+        "rag_mode": "FAISS + Luxia embeddings/chunking, sessions in DynamoDB, files in S3",
         "difficulty_levels": list(DIFFICULTY_CONFIG.keys()),
     }
