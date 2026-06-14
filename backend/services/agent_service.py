@@ -55,9 +55,85 @@ Statement:
 Label:
 """
 
-MAIN_PROMPT_TEMPLATE = """You are DebateCoach, a demanding but fair debate opponent. You must answer in English. You defend the position chosen at the beginning of the debate.
+# ─── Difficulty / persona configuration ───────────────────────────────────────
 
-Your responses must be based ONLY on the document excerpts provided below. Do not use outside knowledge. Do not refer to "chunks," "excerpts," "the document says," or similar meta-references — speak naturally, as if the information were simply part of your own argument. If the excerpts do not contain enough information to address the statement, say so explicitly rather than guessing.
+DIFFICULTY_CONFIG = {
+    "easy": {
+        "persona": (
+            "You are a friendly, encouraging debate partner suited for beginners. "
+            "Keep your counterarguments gentle and straightforward. Avoid overly "
+            "complex reasoning chains. Occasionally acknowledge good points the "
+            "user makes before offering a counterpoint."
+        ),
+        "feedback_focus": (
+            "Focus on building confidence. Emphasize what the user did well, "
+            "use simple and encouraging language, and suggest only 1 small, "
+            "achievable improvement. Avoid overwhelming the user with multiple "
+            "criticisms."
+        ),
+    },
+    "medium": {
+        "persona": (
+            "You are a balanced, moderately challenging debate partner. Offer "
+            "well-reasoned counterarguments grounded in the reference material, "
+            "and point out weaknesses in the user's reasoning when relevant, "
+            "but remain collegial."
+        ),
+        "feedback_focus": (
+            "Provide a balanced mix of strengths and areas for improvement. "
+            "Point out any logical fallacies detected and explain briefly why "
+            "they weaken the argument. Suggest 1-2 concrete improvements."
+        ),
+    },
+    "hard": {
+        "persona": (
+            "You are a rigorous, challenging debate opponent. Press the user "
+            "on weaknesses, gaps in evidence, and logical inconsistencies. "
+            "Use the reference material to construct strong counterarguments "
+            "and do not concede points easily. Remain respectful but firm."
+        ),
+        "feedback_focus": (
+            "Be direct and critical. Thoroughly analyze weaknesses, including "
+            "every logical fallacy detected, unsupported claims, and missed "
+            "opportunities to engage with the reference material. Hold the "
+            "user to a high standard and give detailed, actionable suggestions "
+            "for improvement."
+        ),
+    },
+}
+
+
+def get_difficulty_config(level: str) -> tuple[str, dict]:
+    """Map frontend level name to DIFFICULTY_CONFIG key and return (key, cfg)."""
+    level = (level or "easy").strip().lower()
+    # frontend sends "intermediate", config key is "medium"
+    if level == "intermediate":
+        level = "medium"
+    if level not in DIFFICULTY_CONFIG:
+        print(f"[WARN] Unknown difficulty '{level}', defaulting to 'easy'")
+        level = "easy"
+    return level, DIFFICULTY_CONFIG[level]
+
+
+# ─── Prompt templates ─────────────────────────────────────────────────────────
+
+OPENING_PROMPT_TEMPLATE = """{persona}
+
+You must answer in English.
+
+Read the document excerpts below and take a clear stance on the central topic or argument of the document.
+
+Document excerpts:
+{context}
+
+In exactly two sentences, state your stance (the position you will be arguing for in this debate) and a brief reason for it. Do not exceed two sentences. Base your stance only on the content of the excerpts above. Then, in a third sentence, invite the user to present their argument.
+"""
+
+MAIN_PROMPT_TEMPLATE = """{persona}
+
+You must answer in English. You defend the position chosen at the beginning of the debate.
+
+Your responses must be based ONLY on the document excerpts provided below. Do not use outside knowledge. Do not refer to "chunks," "excerpts," "the document says," or similar meta-references - speak naturally, as if the information were simply part of your own argument. If the excerpts do not contain enough information to address the statement, say so explicitly rather than guessing.
 
 {fallacy_note}
 
@@ -102,7 +178,10 @@ CLARIFICATION_RESPONSE_TEMPLATE = """The user's message does not appear to relat
 
 Generate a brief response (2-3 sentences) that directly and matter-of-factly redirects the user back to the debate topic, then restates the AI's current position.
 
-Tone: brisk, businesslike, slightly impatient — like a debate opponent who wants to get back on track.
+BAD example (do not write like this): "I appreciate your input, but I need to keep our discussion focused on the debate topic."
+GOOD example (write like this): "That's not related to our debate. Let's get back to the topic. [restate the AI's position briefly]."
+
+Tone: brisk, businesslike, slightly impatient - like a debate opponent who wants to get back on track.
 
 Initial AI position:
 {ai_position}
@@ -145,7 +224,9 @@ Generate a short, specific web search query (3-8 words) to verify or find inform
 Respond ONLY with the search query text, nothing else.
 """
 
-SEARCH_RESPONSE_TEMPLATE = """You are DebateCoach, a demanding but fair debate opponent. You must answer in English. You defend the position chosen at the beginning of the debate.
+SEARCH_RESPONSE_TEMPLATE = """{persona}
+
+You must answer in English. You defend the position chosen at the beginning of the debate.
 
 The user made a claim that goes beyond the debate document, so you searched the web for additional context.
 
@@ -169,6 +250,8 @@ User's new argument:
 Respond in a constructive, debate-appropriate tone, in 2-4 sentences. You may reference the web search results naturally (e.g. "recent reports indicate...") without mentioning "search results" or "chunks" explicitly.
 """
 
+
+# ─── Agent class ──────────────────────────────────────────────────────────────
 
 class DebateAgent:
     def __init__(self, luxia_api_key: str, model_name: str):
@@ -204,6 +287,16 @@ class DebateAgent:
                 wait_time *= 2
         return "error"
 
+    def generate_opening_stance(self, rag_index, difficulty_cfg: dict) -> dict:
+        overview_query = "main argument thesis summary of this document"
+        evidence = rag_index.search(overview_query) if rag_index else []
+        context = "\n\n---\n\n".join(e["text"] for e in evidence)
+        prompt = OPENING_PROMPT_TEMPLATE.format(
+            persona=difficulty_cfg["persona"],
+            context=context,
+        )
+        return {"response": self._call_luxia(prompt), "evidence": evidence}
+
     def _route_message(self, user_message: str, history: list[dict], ai_position: str) -> dict:
         history_text = "\n".join(
             f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
@@ -234,9 +327,14 @@ class DebateAgent:
         return decision
 
     def _generate_clarification(self, reason: str, ai_position: str, history: list[dict]) -> str:
+        history_text = "\n".join(
+            f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
+            for msg in history[-6:]
+        )
         prompt = CLARIFICATION_RESPONSE_TEMPLATE.format(
             reason=reason,
             ai_position=ai_position,
+            history_text=history_text,
         )
         return self._call_luxia(prompt)
 
@@ -264,14 +362,11 @@ class DebateAgent:
         if not sender or not app_password:
             print("[EMAIL] SMTP credentials not configured")
             return False
-
         subject = "Your DebateCoach Feedback"
         body = (
-            f"Hi,\n\n"
-            f"Here is your debate feedback (session: {session_id}).\n\n"
-            f"Score — You: {feedback['score']['user']}/100, AI: {feedback['score']['ai']}/100\n\n"
-            f"{feedback['summary']}\n\n"
-            f"— DebateCoach\n"
+            f"Hi,\n\nHere is your debate feedback (session: {session_id}).\n\n"
+            f"Score - You: {feedback['score']['user']}/100, AI: {feedback['score']['ai']}/100\n\n"
+            f"{feedback['summary']}\n\n- DebateCoach\n"
         )
         msg = MIMEMultipart()
         msg["From"] = sender
@@ -334,7 +429,20 @@ class DebateAgent:
             print(f"[SEARCH ERROR] {e}")
             return "Web search unavailable."
 
-    def process_turn(self, user_message: str, history: list[dict], rag_index, ai_position: str, session_data: dict, feedback_fn) -> dict:
+    def process_turn(
+        self,
+        user_message: str,
+        history: list[dict],
+        rag_index,
+        ai_position: str,
+        session_data: dict,
+        feedback_fn,
+        difficulty_cfg: dict | None = None,
+    ) -> dict:
+        if difficulty_cfg is None:
+            difficulty_cfg = DIFFICULTY_CONFIG["easy"]
+        persona = difficulty_cfg["persona"]
+
         decision = self._route_message(user_message, history, ai_position)
 
         if decision["action"] == "end_debate":
@@ -342,9 +450,8 @@ class DebateAgent:
                 reason=decision["reason"],
                 ai_position=ai_position,
             )
-            response_text = self._call_luxia(prompt)
             return {
-                "response": response_text,
+                "response": self._call_luxia(prompt),
                 "evidence": [],
                 "fallacy": {"has_fallacy": False, "fallacy_type": "none", "explanation": "No fallacy detected."},
                 "strategy": "agent_end_debate",
@@ -356,9 +463,8 @@ class DebateAgent:
         if decision["action"] == "send_feedback_email":
             email = self._extract_email(user_message)
             if email is None:
-                response_text = self._call_luxia(EMAIL_FAILURE_TEMPLATE)
                 return {
-                    "response": response_text,
+                    "response": self._call_luxia(EMAIL_FAILURE_TEMPLATE),
                     "evidence": [],
                     "fallacy": {"has_fallacy": False, "fallacy_type": "none", "explanation": "No fallacy detected."},
                     "strategy": "agent_email_failed",
@@ -368,10 +474,11 @@ class DebateAgent:
                 }
             feedback = feedback_fn(session_data)
             sent = self._send_feedback_email(email, feedback, session_data.get("session_id", "unknown"))
-            if sent:
-                response_text = self._call_luxia(EMAIL_CONFIRMATION_TEMPLATE.format(email=email))
-            else:
-                response_text = f"I tried to send the feedback to {email}, but something went wrong. Please try again later."
+            response_text = (
+                self._call_luxia(EMAIL_CONFIRMATION_TEMPLATE.format(email=email))
+                if sent
+                else f"I tried to send the feedback to {email}, but something went wrong. Please try again later."
+            )
             return {
                 "response": response_text,
                 "evidence": [],
@@ -387,29 +494,19 @@ class DebateAgent:
             evidence = rag_index.search(user_message) if rag_index else []
             fallacy_label = self._classify_fallacy(user_message)
             fallacy_note = self._build_fallacy_note(fallacy_label)
-            fallacy = {
-                "has_fallacy": fallacy_label != "none",
-                "fallacy_type": fallacy_label,
-                "explanation": FALLACY_DESCRIPTIONS.get(fallacy_label, "No fallacy detected."),
-            }
             history_text = "\n".join(
-                f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
-                for msg in history
+                f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}" for msg in history
             )
-            context = "\n\n---\n\n".join(e["text"] for e in evidence)
             prompt = SEARCH_RESPONSE_TEMPLATE.format(
-                fallacy_note=fallacy_note,
-                ai_position=ai_position,
-                context=context,
-                search_results=search_results,
-                history_text=history_text,
-                user_statement=user_message,
+                persona=persona, fallacy_note=fallacy_note, ai_position=ai_position,
+                context="\n\n---\n\n".join(e["text"] for e in evidence),
+                search_results=search_results, history_text=history_text, user_statement=user_message,
             )
-            response_text = self._call_luxia(prompt)
             return {
-                "response": response_text,
+                "response": self._call_luxia(prompt),
                 "evidence": evidence,
-                "fallacy": fallacy,
+                "fallacy": {"has_fallacy": fallacy_label != "none", "fallacy_type": fallacy_label,
+                            "explanation": FALLACY_DESCRIPTIONS.get(fallacy_label, "No fallacy detected.")},
                 "strategy": "agent_search_web",
                 "agent_decision": decision["action"],
                 "agent_reason": decision["reason"],
@@ -417,9 +514,8 @@ class DebateAgent:
             }
 
         if decision["action"] == "request_clarification":
-            response_text = self._generate_clarification(decision["reason"], ai_position, history)
             return {
-                "response": response_text,
+                "response": self._generate_clarification(decision["reason"], ai_position, history),
                 "evidence": [],
                 "fallacy": {"has_fallacy": False, "fallacy_type": "none", "explanation": "No fallacy detected."},
                 "strategy": "agent_clarification",
@@ -428,32 +524,23 @@ class DebateAgent:
                 "pipeline_steps": [],
             }
 
-        # Default: continue_debate
+        # continue_debate
         evidence = rag_index.search(user_message) if rag_index else []
         fallacy_label = self._classify_fallacy(user_message)
         fallacy_note = self._build_fallacy_note(fallacy_label)
-        fallacy = {
-            "has_fallacy": fallacy_label != "none",
-            "fallacy_type": fallacy_label,
-            "explanation": FALLACY_DESCRIPTIONS.get(fallacy_label, "No fallacy detected."),
-        }
         history_text = "\n".join(
-            f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}"
-            for msg in history
+            f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}" for msg in history
         )
-        context = "\n\n---\n\n".join(e["text"] for e in evidence)
         prompt = MAIN_PROMPT_TEMPLATE.format(
-            fallacy_note=fallacy_note,
-            ai_position=ai_position,
-            context=context,
-            history_text=history_text,
-            user_statement=user_message,
+            persona=persona, fallacy_note=fallacy_note, ai_position=ai_position,
+            context="\n\n---\n\n".join(e["text"] for e in evidence),
+            history_text=history_text, user_statement=user_message,
         )
-        response_text = self._call_luxia(prompt)
         return {
-            "response": response_text,
+            "response": self._call_luxia(prompt),
             "evidence": evidence,
-            "fallacy": fallacy,
+            "fallacy": {"has_fallacy": fallacy_label != "none", "fallacy_type": fallacy_label,
+                        "explanation": FALLACY_DESCRIPTIONS.get(fallacy_label, "No fallacy detected.")},
             "strategy": "luxia_manual_pipeline",
             "agent_decision": decision["action"],
             "agent_reason": decision["reason"],

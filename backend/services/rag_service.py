@@ -10,7 +10,7 @@ LUXIA_API_KEY = os.getenv("LUXIA_API_KEY")
 EMBED_URL = "https://bridge.luxiacloud.com/luxia/v1/embedding"
 CHUNK_URL = "https://bridge.luxiacloud.com/luxia/v1/document-chunk"
 MAX_EMBED_CHARS = 4000
-EMBED_BATCH_SIZE = 32  # texts per embedding API call
+EMBED_BATCH_SIZE = 32
 
 
 def safe_source_name(filename: str) -> str:
@@ -18,6 +18,7 @@ def safe_source_name(filename: str) -> str:
 
 
 def get_chunk_config(text_len: int) -> dict:
+    """Pick chunk_size / overlap / k based on document length."""
     if text_len < 15000:
         return {"chunk_size": 800, "overlap": 100, "k": 3}
     elif text_len < 40000:
@@ -114,6 +115,13 @@ class RAGIndex:
 
     @classmethod
     def from_pages_documents(cls, documents: list[dict]):
+        """
+        documents: list of {"filename": str, "pages": [{"page": int, "text": str}, ...]}
+
+        Joins all pages per document, picks an adaptive chunk config based on
+        the combined text length across all documents, then chunks each
+        document via the Luxia chunking API and embeds every chunk in batches.
+        """
         full_texts = {}
         total_text_len = 0
         for doc in documents:
@@ -146,7 +154,7 @@ class RAGIndex:
 
         texts = [c["text"] for c in all_chunks]
         n_batches = (len(texts) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
-        print(f"[EMBED] {len(texts)} chunks → {n_batches} batch call(s)")
+        print(f"[EMBED] {len(texts)} chunks -> {n_batches} batch call(s)")
 
         embeddings = []
         for i in range(0, len(texts), EMBED_BATCH_SIZE):

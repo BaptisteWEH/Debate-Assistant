@@ -1,4 +1,5 @@
 import Link from "next/link";
+import AuthButton from "@/components/AuthButton";
 
 const STEPS = [
     {
@@ -67,6 +68,7 @@ export default function Home() {
                         className="hover:text-gray-900 transition-colors">
                         Scoring rubric
                     </Link>
+                    <AuthButton />
                     <Link href="/upload"
                         style={{ background: "#0A0A0A", color: "white", fontSize: 14, fontWeight: 500, padding: "8px 18px", borderRadius: 9, textDecoration: "none" }}
                         className="hover:opacity-85 transition-opacity">

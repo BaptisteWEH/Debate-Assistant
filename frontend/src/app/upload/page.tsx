@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 import Link from "next/link";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -77,6 +78,7 @@ export default function UploadPage() {
     const [isDragging, setIsDragging] = useState(false);
     const stepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const router = useRouter();
+    const { data: session } = useSession();
 
     useEffect(() => {
         if (isUploading) {
@@ -109,9 +111,11 @@ export default function UploadPage() {
 
         const sessionId = crypto.randomUUID();
         const form = new FormData();
-        form.append("file", file);
+        form.append("file1", file);
         form.append("session_id", sessionId);
         form.append("level", level);
+        const userId = (session?.user as { id?: string } | undefined)?.id;
+        if (userId) form.append("user_id", userId);
 
         try {
             const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
