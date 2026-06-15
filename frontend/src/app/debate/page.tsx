@@ -1,8 +1,9 @@
-﻿"use client";
+"use client";
 
 import { useState, useRef, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-// ─── Types ────────────────────────────────────────────────────────────────────
+import { useSearchParams, useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
+import Link from "next/link";
 
 interface Message {
     role: "ai" | "user";
@@ -12,101 +13,114 @@ interface Message {
 
 interface EvidenceItem {
     id: string;
-    page: number;
+    source?: string;
+    page?: number;
+    pages?: string;
     text: string;
-    score?: number; // cosine similarity 0-1 from FAISS, optional
+    score?: number;
 }
 
-// ─── API contract ─────────────────────────────────────────────────────────────
-//
-//  POST /debate
-//  Body:  { message: string, session_id: string }
-//  Response:
-//    {
-//      response: string,          // AI debate turn text
-//      audio_url: string,         // S3 pre-signed URL for Polly MP3
-//      evidence: EvidenceItem[],  // top-k FAISS chunks (id, page, text, score)
-//      session_id: string         // echo back so frontend can persist it
-//    }
-//
-//  POST /transcribe
-//  Body:  FormData { audio: Blob (webm/ogg), session_id: string }
-//  Response:
-//    {
-//      transcript: string         // AWS Transcribe result
-//    }
-//
-//  POST /end-session
-//  Body:  { session_id: string }
-//  Response:
-//    {
-//      score: { user: number, ai: number },   // 0-100
-//      summary: string,
-//      transcript_url: string                 // S3 JSON file URL
-//    }
-//
-// ─────────────────────────────────────────────────────────────────────────────
+interface FallacyInfo {
+    has_fallacy: boolean;
+    fallacy_type: string;
+    explanation: string;
+}
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+const LEVEL_CONFIG: Record<string, { label: string; color: string; bg: string; border: string }> = {
+    easy:         { label: "Easy",         color: "#16A34A", bg: "#F0FDF4", border: "#BBF7D0" },
+    intermediate: { label: "Intermediate", color: "#2563EB", bg: "#EFF6FF", border: "#BFDBFE" },
+    hard:         { label: "Hard",         color: "#DC2626", bg: "#FFF1F2", border: "#FECDD3" },
+};
 
 function formatTime(d: Date) {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// ─── Mic button states ────────────────────────────────────────────────────────
+function formatDuration(seconds: number) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function SparkBars({ stats }: { stats: number[] }) {
+    const SLOTS = 8;
+    const H = 52;
+    const maxVal = Math.max(...stats, 1);
+    return (
+        <svg viewBox={`0 0 220 ${H}`} width="100%" height={H}
+            preserveAspectRatio="none" style={{ display: "block" }}>
+            {Array.from({ length: SLOTS }).map((_, i) => {
+                const hasData = i < stats.length;
+                const h = hasData ? Math.max(5, Math.round((stats[i] / maxVal) * (H - 4))) : 5;
+                const isLatest = hasData && i === stats.length - 1;
+                return (
+                    <rect key={i}
+                        x={i * 28} y={H - h}
+                        width={20} height={h} rx={3}
+                        fill={isLatest ? "#08090A" : hasData ? "#D4D4D8" : "#EBEBEB"}
+                    />
+                );
+            })}
+        </svg>
+    );
+}
 
 type MicState = "idle" | "recording" | "processing";
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 function DebatePageInner() {
     const searchParams = useSearchParams();
+    const router = useRouter();
+    const { data: session } = useSession();
+
     const sessionIdFromUrl = searchParams.get("session_id");
-    const openingFromUrl = searchParams.get("opening");
+    const openingFromUrl   = searchParams.get("opening");
+    const levelFromUrl     = searchParams.get("level") ?? "easy";
+    const filenameFromUrl  = searchParams.get("filename") ?? "Document";
 
     const [messages, setMessages] = useState<Message[]>([
         {
             role: "ai",
-            text: openingFromUrl ||
-                "I've read your document and I'm ready to defend my position. Make your opening argument.",
-            timestamp: formatTime(new Date()),
+            text: openingFromUrl || "I've read your document and I'm ready to defend my position. Make your opening argument.",
         },
     ]);
-    const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
-    const [input, setInput] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [micState, setMicState] = useState<MicState>("idle");
-    // Use the session_id minted on the upload page so the backend can correlate
-    // the FAISS index (built during upload) with this debate session.
-    const [sessionId] = useState(() => sessionIdFromUrl ?? crypto.randomUUID());
-    const [sessionEnded, setSessionEnded] = useState(false);
-    const [scoreData, setScoreData] = useState<{
-        score: { user: number; ai: number };
-        summary: string;
-    } | null>(null);
+    const [evidence, setEvidence]         = useState<EvidenceItem[]>([]);
+    const [fallacy, setFallacy]           = useState<FallacyInfo | null>(null);
+    const [input, setInput]               = useState("");
+    const [loading, setLoading]           = useState(false);
+    const [micState, setMicState]         = useState<MicState>("idle");
+    const [sessionId]                     = useState(() => sessionIdFromUrl ?? (typeof window !== "undefined" ? crypto.randomUUID() : ""));
     const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
+    const [elapsed, setElapsed]           = useState(0);
+    const [roundStats, setRoundStats]     = useState<number[]>([]);
+    const [fallacyCount, setFallacyCount] = useState(0);
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef = useRef<Blob[]>([]);
+    const audioChunksRef   = useRef<Blob[]>([]);
     const transcriptEndRef = useRef<HTMLDivElement | null>(null);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
+    const textareaRef      = useRef<HTMLTextAreaElement | null>(null);
+    const audioRef         = useRef<HTMLAudioElement | null>(null);
+    const timerRef         = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    // Auto-scroll transcript
+    const levelCfg = LEVEL_CONFIG[levelFromUrl] ?? LEVEL_CONFIG.easy;
+
+    useEffect(() => {
+        timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+        return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    }, []);
+
     useEffect(() => {
         transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages, loading]);
 
-    // ── Send text turn ──────────────────────────────────────────────────────
-
     const sendMessage = async (text: string) => {
         if (!text.trim() || loading) return;
         setInput("");
+        setFallacy(null);
 
-        const userMsg: Message = {
-            role: "user",
-            text,
-            timestamp: formatTime(new Date()),
-        };
+        const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+        const userMsg: Message = { role: "user", text, timestamp: formatTime(new Date()) };
         const next = [...messages, userMsg];
         setMessages(next);
         setLoading(true);
@@ -118,35 +132,40 @@ function DebatePageInner() {
                 body: JSON.stringify({ message: text, session_id: sessionId }),
             });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
 
-            const aiMsg: Message = {
-                role: "ai",
-                text: data.response,
-                timestamp: formatTime(new Date()),
-            };
-            setMessages([...next, aiMsg]);
+            setMessages([...next, { role: "ai", text: data.response, timestamp: formatTime(new Date()) }]);
             setEvidence(data.evidence ?? []);
 
-            // Play Polly audio if returned
+            const hasFallacy = data.fallacy?.has_fallacy;
+            setFallacy(hasFallacy ? data.fallacy : null);
+            if (hasFallacy) setFallacyCount((c) => c + 1);
+            setRoundStats((prev) => [...prev, wordCount]);
+
             if (data.audio_url) {
                 audioRef.current = new Audio(data.audio_url);
                 audioRef.current.play();
             }
+
+            if (data.agent_decision === "end_debate" && data.session_feedback) {
+                const fb = data.session_feedback;
+                sessionStorage.setItem("debateResult", JSON.stringify({
+                    user_score:  fb.score?.user ?? 0,
+                    ai_score:    fb.score?.ai ?? 0,
+                    summary:     fb.summary ?? "",
+                    level:       levelFromUrl,
+                    dimensions:  fb.dimensions ?? {},
+                    qualitative: fb.qualitative ?? {},
+                }));
+                router.push("/result");
+                return;
+            }
         } catch (err) {
             console.error(err);
-            setMessages([
-                ...next,
-                {
-                    role: "ai",
-                    text: "⚠️ Connection error. Please check the backend.",
-                    timestamp: formatTime(new Date()),
-                },
-            ]);
+            setMessages([...next, { role: "ai", text: "Connection error. Please check the backend is running.", timestamp: formatTime(new Date()) }]);
         }
         setLoading(false);
     };
-
-    // ── Microphone recording ────────────────────────────────────────────────
 
     const startRecording = async () => {
         try {
@@ -154,9 +173,7 @@ function DebatePageInner() {
             const mr = new MediaRecorder(stream);
             mediaRecorderRef.current = mr;
             audioChunksRef.current = [];
-            mr.ondataavailable = (e) => {
-                if (e.data.size > 0) audioChunksRef.current.push(e.data);
-            };
+            mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
             mr.onstop = handleRecordingStop;
             mr.start();
             setMicState("recording");
@@ -176,343 +193,420 @@ function DebatePageInner() {
         const form = new FormData();
         form.append("audio", blob, "recording.webm");
         form.append("session_id", sessionId);
-
         try {
-            const res = await fetch(`${API_BASE}/transcribe`, {
-                method: "POST",
-                body: form,
-            });
+            const res  = await fetch(`${API_BASE}/transcribe`, { method: "POST", body: form });
             const data = await res.json();
-            if (data.transcript?.trim()) {
-                await sendMessage(data.transcript);
-            }
-        } catch (err) {
-            console.error(err);
-        }
+            if (data.transcript?.trim()) await sendMessage(data.transcript);
+        } catch (err) { console.error(err); }
         setMicState("idle");
     };
 
     const toggleMic = () => {
-        if (micState === "idle") startRecording();
+        if (micState === "idle")           startRecording();
         else if (micState === "recording") stopRecording();
     };
-
-    // ── End session ─────────────────────────────────────────────────────────
 
     const endSession = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/end-session`, {
+            const res  = await fetch(`${API_BASE}/end-session`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ session_id: sessionId }),
             });
             const data = await res.json();
-            setScoreData({ score: data.score, summary: data.summary });
-            setSessionEnded(true);
+            if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
+            sessionStorage.setItem("debateResult", JSON.stringify({
+                user_score:  data.score.user,
+                ai_score:    data.score.ai,
+                summary:     data.summary,
+                level:       levelFromUrl,
+                dimensions:  data.dimensions ?? {},
+                qualitative: data.qualitative ?? {},
+            }));
+            router.push("/result");
         } catch {
             alert("Could not end session. Please try again.");
+            setLoading(false);
         }
-        setLoading(false);
     };
 
-    // ─────────────────────────────────────────────────────────────────────────
-
-    if (sessionEnded && scoreData) {
-        return <ScoreScreen scoreData={scoreData} />;
-    }
+    const turns = Math.floor((messages.length - 1) / 2);
 
     return (
-        <main className="min-h-screen bg-gray-50 p-4 md:p-6 font-sans">
-            <div
-                className="grid gap-4 md:gap-6 h-[92vh]"
-                style={{ gridTemplateColumns: "1fr 2fr" }}
-            >
-                {/* ── Evidence Panel ─────────────────────────────────────────── */}
-                <aside className="bg-white rounded-3xl shadow-md flex flex-col overflow-hidden">
-                    <div className="px-6 pt-6 pb-4 border-b border-gray-100">
-                        <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 mb-1">
-                            Retrieved Evidence
-                        </p>
-                        <h2 className="text-xl font-bold text-gray-900">Document Passages</h2>
-                        <p className="text-xs text-gray-400 mt-1">
-                            Top chunks the AI used in its last turn
-                        </p>
+        <>
+            <style>{`
+                @keyframes spin { to { transform: rotate(360deg); } }
+                @keyframes bounce-dot { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-5px)} }
+                .dot-anim { animation: bounce-dot 1.2s ease-in-out infinite; }
+                input::placeholder { color: #A1A1AA; }
+                .sidebar-sec { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-4); margin-bottom: 10px; }
+            `}</style>
+
+            <main style={{
+                height: "100vh", display: "flex", flexDirection: "column",
+                background: "var(--bg)", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif",
+                overflow: "hidden",
+            }}>
+
+                {/* Header */}
+                <header style={{
+                    background: "var(--nav)", backdropFilter: "blur(12px)",
+                    borderBottom: "1px solid rgba(0,0,0,0.06)",
+                    padding: "0 32px", height: 72,
+                    display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
+                    position: "relative",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <svg width="28" height="28" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
+                                <ellipse cx="21.8432" cy="40" rx="21.8432" ry="40" transform="matrix(-0.659044 0.752104 0.752104 0.659044 49.791 18.9385)" fill="currentColor"/>
+                                <ellipse cx="65.4794" cy="61.7286" rx="21.8432" ry="40" transform="rotate(48.773 65.4794 61.7286)" fill="currentColor"/>
+                            </svg>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>DebateCoach</span>
+                        <span style={{ fontSize: 12, color: "var(--text-4)", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginLeft: 6 }}>
+                            {filenameFromUrl}
+                        </span>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-                        {evidence.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center h-full text-center gap-3 text-gray-300">
-                                <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-                                </svg>
-                                <p className="text-sm">Passages will appear here after the AI responds.</p>
+                    {/* Truly centered stats */}
+                    <div style={{
+                        position: "absolute", left: "50%", top: "50%",
+                        transform: "translate(-50%, calc(-50% + 4px))",
+                        display: "flex", alignItems: "center", gap: 32,
+                    }}>
+                        <div style={{ textAlign: "center" }}>
+                            <p style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", lineHeight: 1 }}>{levelCfg.label}</p>
+                            <p style={{ fontSize: 10, color: "var(--text-4)", marginTop: 3, letterSpacing: "0.07em" }}>LEVEL</p>
+                        </div>
+                        <div style={{ textAlign: "center" }}>
+                            <p style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", lineHeight: 1 }}>{turns}</p>
+                            <p style={{ fontSize: 10, color: "var(--text-4)", marginTop: 3, letterSpacing: "0.07em" }}>ROUNDS</p>
+                        </div>
+                        <div style={{ textAlign: "center" }}>
+                            <p style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{formatDuration(elapsed)}</p>
+                            <p style={{ fontSize: 10, color: "var(--text-4)", marginTop: 3, letterSpacing: "0.07em" }}>ELAPSED</p>
+                        </div>
+                    </div>
+
+                    <button
+                        onClick={endSession}
+                        disabled={loading}
+                        style={{
+                            background: "var(--btn)", color: "var(--btn-fg)", border: "none",
+                            borderRadius: 9, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                            cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.5 : 1,
+                            display: "flex", alignItems: "center", gap: 6,
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+                        }}
+                    >
+                        <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0 2.77-.693a9 9 0 0 1 6.208.682l.108.054a9 9 0 0 0 6.086.71l3.114-.732a48.524 48.524 0 0 1-.005-10.499l-3.11.732a9 9 0 0 1-6.085-.711l-.108-.054a9 9 0 0 0-6.208-.682L3 15Z" />
+                        </svg>
+                        End &amp; Score
+                    </button>
+                </header>
+
+                {/* Body */}
+                <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+
+                    {/* Left sidebar — always visible */}
+                    <aside style={{
+                        width: 256, flexShrink: 0,
+                        background: "var(--card)", borderRight: "1px solid var(--border)",
+                        display: "flex", flexDirection: "column", overflow: "hidden",
+                    }}>
+
+                        {/* Live performance */}
+                        <div style={{ padding: "16px 16px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+                            <p className="sidebar-sec">Live Performance</p>
+                            <SparkBars stats={roundStats} />
+                            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                                <div style={{ flex: 1, background: "var(--subtle)", borderRadius: 10, padding: "9px 10px" }}>
+                                    <p style={{ fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1 }}>{turns}</p>
+                                    <p style={{ fontSize: 10, color: "var(--text-4)", marginTop: 3 }}>Rounds</p>
+                                </div>
+                                <div style={{ flex: 1, borderRadius: 10, padding: "9px 10px", background: "var(--subtle)" }}>
+                                    <p style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: "var(--text)" }}>{fallacyCount}</p>
+                                    <p style={{ fontSize: 10, marginTop: 3, color: "var(--text-4)" }}>Fallacies</p>
+                                </div>
                             </div>
-                        ) : (
-                            evidence.map((item) => (
-                                <button
-                                    key={item.id}
-                                    onClick={() =>
-                                        setActiveEvidenceId(
-                                            activeEvidenceId === item.id ? null : item.id
-                                        )
-                                    }
-                                    className={`w-full text-left rounded-2xl p-4 border transition-all ${activeEvidenceId === item.id
-                                            ? "border-black bg-gray-50 shadow-sm"
-                                            : "border-gray-100 bg-gray-50 hover:border-gray-300"
-                                        }`}
-                                >
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                                            Page {item.page}
-                                        </span>
-                                        {item.score !== undefined && (
-                                            <span className="text-xs font-mono bg-black text-white rounded-full px-2 py-0.5">
-                                                {Math.round(item.score * 100)}% match
-                                            </span>
+                            {roundStats.length > 1 && (
+                                <p style={{ fontSize: 11, color: "var(--text-4)", marginTop: 8 }}>
+                                    Avg {Math.round(roundStats.reduce((a, b) => a + b, 0) / roundStats.length)} words/round
+                                </p>
+                            )}
+                        </div>
+
+                        {/* Evidence */}
+                        <div style={{ padding: "14px 16px 8px", flexShrink: 0 }}>
+                            <p className="sidebar-sec">
+                                Evidence{evidence.length > 0 ? ` (${evidence.length})` : ""}
+                            </p>
+                        </div>
+                        <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 16px" }}>
+                            {evidence.length === 0 ? (
+                                <p style={{ fontSize: 12, color: "var(--text-4)", lineHeight: 1.6, paddingTop: 4 }}>
+                                    Passages cited by the AI will appear here after each response.
+                                </p>
+                            ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                                    {evidence.map((item) => (
+                                        <div
+                                            key={item.id}
+                                            onClick={() => setActiveEvidenceId(activeEvidenceId === item.id ? null : item.id)}
+                                            style={{
+                                                borderLeft: `2px solid ${activeEvidenceId === item.id ? "var(--text)" : "var(--border)"}`,
+                                                paddingLeft: 12, cursor: "pointer",
+                                                transition: "border-color 0.15s",
+                                            }}
+                                        >
+                                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5, gap: 6 }}>
+                                                <span style={{ fontSize: 10, fontWeight: 600, color: "var(--text-4)", textTransform: "uppercase", letterSpacing: "0.06em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                    {item.source ?? "Document"}{item.pages ? ` · p.${item.pages}` : item.page ? ` · p.${item.page}` : ""}
+                                                </span>
+                                                {item.score !== undefined && (
+                                                    <span style={{ fontSize: 10, color: "var(--text-4)", flexShrink: 0 }}>
+                                                        {Math.round(item.score * 100)}%
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <p style={{
+                                                fontSize: 12, color: "var(--text-2)", lineHeight: 1.65,
+                                                display: "-webkit-box", WebkitBoxOrient: "vertical" as const,
+                                                WebkitLineClamp: activeEvidenceId === item.id ? undefined : 4,
+                                                overflow: "hidden",
+                                            }}>
+                                                {item.text}
+                                            </p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* History + Account footer */}
+                        <div style={{ flexShrink: 0, borderTop: "1px solid var(--border)", padding: "12px 14px" }}>
+                            {session ? (
+                                <>
+                                    <Link href="/history" style={{
+                                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                                        textDecoration: "none", padding: "8px 0",
+                                        borderBottom: "1px solid var(--border)", marginBottom: 10,
+                                    }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                                            <svg width="14" height="14" fill="none" stroke="var(--text-3)" strokeWidth="2" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                                            </svg>
+                                            <span style={{ fontSize: 13, color: "var(--text-3)", fontWeight: 500 }}>Session history</span>
+                                        </div>
+                                        <svg width="12" height="12" fill="none" stroke="var(--text-4)" strokeWidth="2" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                                        </svg>
+                                    </Link>
+                                    <Link href="/settings" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
+                                        {session.user?.image ? (
+                                            // eslint-disable-next-line @next/next/no-img-element
+                                            <img src={session.user.image} alt="avatar" width={28} height={28} style={{ borderRadius: "50%", border: "1px solid var(--border)" }} />
+                                        ) : (
+                                            <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-3)" }}>
+                                                    {session.user?.name?.[0]?.toUpperCase() ?? "U"}
+                                                </span>
+                                            </div>
+                                        )}
+                                        <div style={{ flex: 1, overflow: "hidden" }}>
+                                            <p style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                {session.user?.name ?? "User"}
+                                            </p>
+                                            <p style={{ fontSize: 11, color: "var(--text-4)" }}>Settings →</p>
+                                        </div>
+                                    </Link>
+                                </>
+                            ) : (
+                                <Link href="/login" style={{
+                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                    textDecoration: "none", background: "var(--btn)", color: "var(--btn-fg)",
+                                    padding: "9px 0", borderRadius: 10, fontSize: 13, fontWeight: 600,
+                                }}>
+                                    Sign in to save history
+                                </Link>
+                            )}
+                        </div>
+                    </aside>
+
+                    {/* Chat panel */}
+                    <section style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+
+                        {/* Fallacy alert */}
+                        {fallacy && (
+                            <div style={{
+                                margin: "12px 20px 0",
+                                background: "var(--card)", border: "1px solid var(--border)",
+                                borderRadius: 12, padding: "11px 14px",
+                                display: "flex", alignItems: "flex-start", gap: 10,
+                                flexShrink: 0, maxWidth: 760, alignSelf: "center", width: "calc(100% - 40px)",
+                                boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
+                            }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <p style={{ fontSize: 10, fontWeight: 700, color: "var(--text-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 3 }}>
+                                        Fallacy · {fallacy.fallacy_type.replace(/_/g, " ")}
+                                    </p>
+                                    <p style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.55 }}>{fallacy.explanation}</p>
+                                </div>
+                                <button onClick={() => setFallacy(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-4)", fontSize: 16, lineHeight: 1, padding: "1px 0 0", flexShrink: 0 }}>
+                                    ×
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Transcript */}
+                        <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", padding: "32px 0" }}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 28, maxWidth: 760, margin: "0 auto", padding: "0 32px" }}>
+                                {messages.map((msg, i) => (
+                                    <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                                        {msg.role === "ai" ? (
+                                            <p style={{
+                                                fontSize: 15, lineHeight: 1.75, color: "var(--text)",
+                                                wordBreak: "break-word", overflowWrap: "break-word",
+                                            }}>
+                                                {msg.text}
+                                            </p>
+                                        ) : (
+                                            <div style={{
+                                                background: "#D0E7FF",
+                                                borderRadius: 18,
+                                                padding: "12px 18px",
+                                                fontSize: 15, lineHeight: 1.7, color: "#1E3A5F",
+                                                maxWidth: "80%",
+                                                wordBreak: "break-word", overflowWrap: "break-word",
+                                            }}>
+                                                {msg.text}
+                                            </div>
+                                        )}
+                                        {msg.timestamp && (
+                                            <span style={{ fontSize: 10, color: "#D4D4D8", marginTop: 4, padding: "0 2px" }}>{msg.timestamp}</span>
                                         )}
                                     </div>
-                                    <p
-                                        className={`text-sm text-gray-700 leading-relaxed ${activeEvidenceId === item.id ? "" : "line-clamp-3"
-                                            }`}
-                                    >
-                                        {item.text}
-                                    </p>
-                                </button>
-                            ))
-                        )}
-                    </div>
-                </aside>
+                                ))}
 
-                {/* ── Debate Panel ───────────────────────────────────────────── */}
-                <section className="bg-white rounded-3xl shadow-md flex flex-col overflow-hidden">
-                    {/* Header */}
-                    <div className="px-6 pt-6 pb-4 border-b border-gray-100 flex items-center justify-between">
-                        <div>
-                            <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 mb-1">
-                                Live Session
-                            </p>
-                            <h2 className="text-xl font-bold text-gray-900">Debate Arena</h2>
-                        </div>
-                        <button
-                            onClick={endSession}
-                            disabled={loading}
-                            className="text-sm border border-gray-200 text-gray-500 px-4 py-2 rounded-xl hover:border-red-300 hover:text-red-500 transition disabled:opacity-40"
-                        >
-                            End &amp; Score
-                        </button>
-                    </div>
-
-                    {/* Transcript */}
-                    <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-                        {messages.map((msg, i) => (
-                            <div
-                                key={i}
-                                className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}
-                            >
-                                {/* Avatar */}
-                                <div
-                                    className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold mt-1 ${msg.role === "ai"
-                                            ? "bg-black text-white"
-                                            : "bg-gray-200 text-gray-700"
-                                        }`}
-                                >
-                                    {msg.role === "ai" ? "AI" : "U"}
-                                </div>
-
-                                {/* Bubble */}
-                                <div className={`max-w-[75%] ${msg.role === "user" ? "items-end" : "items-start"} flex flex-col gap-1`}>
-                                    <div
-                                        className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${msg.role === "ai"
-                                                ? "bg-gray-100 text-gray-900 rounded-tl-sm"
-                                                : "bg-black text-white rounded-tr-sm"
-                                            }`}
-                                    >
-                                        {msg.text}
+                                {loading && (
+                                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                        {[0, 1, 2].map((i) => (
+                                            <span key={i} className="dot-anim" style={{ width: 6, height: 6, borderRadius: "50%", background: "#D4D4D8", display: "inline-block", animationDelay: `${i * 0.15}s` }} />
+                                        ))}
                                     </div>
-                                    {msg.timestamp && (
-                                        <span className="text-[10px] text-gray-400 px-1">
-                                            {msg.timestamp}
-                                        </span>
-                                    )}
-                                </div>
+                                )}
+
+                                <div ref={transcriptEndRef} />
                             </div>
-                        ))}
-
-                        {loading && (
-                            <div className="flex gap-3">
-                                <div className="w-8 h-8 rounded-full bg-black text-white flex-shrink-0 flex items-center justify-center text-xs font-bold mt-1">
-                                    AI
-                                </div>
-                                <div className="bg-gray-100 rounded-2xl rounded-tl-sm px-4 py-3">
-                                    <ThinkingDots />
-                                </div>
-                            </div>
-                        )}
-
-                        <div ref={transcriptEndRef} />
-                    </div>
-
-                    {/* Input bar */}
-                    <div className="px-5 py-4 border-t border-gray-100">
-                        <div className="flex items-center gap-3">
-                            {/* Mic button */}
-                            <MicButton state={micState} onToggle={toggleMic} />
-
-                            {/* Text input */}
-                            <input
-                                type="text"
-                                value={input}
-                                onChange={(e) => setInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter" && !e.shiftKey) {
-                                        e.preventDefault();
-                                        sendMessage(input);
-                                    }
-                                }}
-                                placeholder={
-                                    micState === "recording"
-                                        ? "Recording… click mic to stop"
-                                        : micState === "processing"
-                                            ? "Transcribing…"
-                                            : "Type your argument or use the mic…"
-                                }
-                                disabled={micState !== "idle" || loading}
-                                className="flex-1 bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-black disabled:opacity-50 transition"
-                            />
-
-                            {/* Send button */}
-                            <button
-                                onClick={() => sendMessage(input)}
-                                disabled={!input.trim() || loading || micState !== "idle"}
-                                className="bg-black text-white w-11 h-11 rounded-2xl flex items-center justify-center hover:opacity-80 transition disabled:opacity-30 flex-shrink-0"
-                            >
-                                <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
-                                </svg>
-                            </button>
                         </div>
 
-                        {micState !== "idle" && (
-                            <p className="text-xs text-center mt-2 text-gray-400 animate-pulse">
-                                {micState === "recording" ? "🔴 Recording — click mic to stop" : "⏳ Transcribing your speech…"}
-                            </p>
-                        )}
-                    </div>
-                </section>
-            </div>
-        </main>
-    );
-}
-
-// ─── Mic Button ───────────────────────────────────────────────────────────────
-
-function MicButton({ state, onToggle }: { state: MicState; onToggle: () => void }) {
-    return (
-        <button
-            onClick={onToggle}
-            disabled={state === "processing"}
-            title={state === "idle" ? "Start recording" : "Stop recording"}
-            className={`w-11 h-11 rounded-2xl flex items-center justify-center flex-shrink-0 transition-all ${state === "recording"
-                    ? "bg-red-500 text-white animate-pulse"
-                    : state === "processing"
-                        ? "bg-gray-200 text-gray-400 cursor-wait"
-                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-        >
-            {state === "processing" ? (
-                <svg className="animate-spin" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-            ) : (
-                <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
-                </svg>
-            )}
-        </button>
-    );
-}
-
-// ─── Thinking Dots ────────────────────────────────────────────────────────────
-
-function ThinkingDots() {
-    return (
-        <div className="flex gap-1 items-center h-5">
-            {[0, 1, 2].map((i) => (
-                <span
-                    key={i}
-                    className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"
-                    style={{ animationDelay: `${i * 0.15}s` }}
-                />
-            ))}
-        </div>
-    );
-}
-
-// ─── Score Screen ─────────────────────────────────────────────────────────────
-
-function ScoreScreen({
-    scoreData,
-}: {
-    scoreData: { score: { user: number; ai: number }; summary: string };
-}) {
-    return (
-        <main className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
-            <div className="bg-white rounded-3xl shadow-lg p-10 max-w-xl w-full text-center space-y-8">
-                <div>
-                    <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 mb-2">
-                        Session Complete
-                    </p>
-                    <h1 className="text-4xl font-bold text-gray-900">Debate Score</h1>
+                        {/* Input bar */}
+                        <div style={{ padding: "12px 24px 20px", background: "var(--bg)", flexShrink: 0 }}>
+                            <div style={{ maxWidth: 760, margin: "0 auto" }}>
+                                <div style={{
+                                    background: "var(--card)",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: 20,
+                                    boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
+                                    overflow: "hidden",
+                                }}>
+                                    {micState !== "idle" && (
+                                        <p style={{ fontSize: 12, textAlign: "center", color: micState === "recording" ? "#DC2626" : "#A1A1AA", padding: "10px 16px 0" }}>
+                                            {micState === "recording" ? "Recording — click mic to stop" : "Transcribing..."}
+                                        </p>
+                                    )}
+                                    <textarea
+                                        ref={textareaRef}
+                                        value={input}
+                                        onChange={(e) => {
+                                            setInput(e.target.value);
+                                            e.target.style.height = "auto";
+                                            e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter" && !e.shiftKey) {
+                                                e.preventDefault();
+                                                sendMessage(input);
+                                                if (textareaRef.current) textareaRef.current.style.height = "auto";
+                                            }
+                                        }}
+                                        placeholder={
+                                            micState === "recording" ? "Recording..." :
+                                            micState === "processing" ? "Transcribing..." :
+                                            "Make your argument..."
+                                        }
+                                        disabled={micState !== "idle" || loading}
+                                        rows={1}
+                                        style={{
+                                            width: "100%", background: "transparent",
+                                            border: "none", outline: "none", resize: "none",
+                                            padding: "16px 18px 8px", fontSize: 15,
+                                            fontFamily: "inherit", color: "var(--text)",
+                                            lineHeight: 1.6, display: "block", overflow: "hidden",
+                                        }}
+                                    />
+                                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px 10px" }}>
+                                        <button
+                                            onClick={toggleMic}
+                                            disabled={micState === "processing" || loading}
+                                            style={{
+                                                width: 34, height: 34, borderRadius: 9,
+                                                border: `1px solid ${micState === "recording" ? "#FECDD3" : "var(--border)"}`,
+                                                cursor: micState === "processing" || loading ? "not-allowed" : "pointer",
+                                                display: "flex", alignItems: "center", justifyContent: "center",
+                                                background: micState === "recording" ? "#FFF1F2" : "transparent",
+                                                color: micState === "recording" ? "#DC2626" : "#A1A1AA",
+                                                transition: "all 0.15s",
+                                            }}
+                                            title={micState === "idle" ? "Start recording" : "Stop recording"}
+                                        >
+                                            {micState === "processing" ? (
+                                                <svg style={{ animation: "spin 0.8s linear infinite" }} width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                                </svg>
+                                            ) : (
+                                                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+                                                </svg>
+                                            )}
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                sendMessage(input);
+                                                if (textareaRef.current) textareaRef.current.style.height = "auto";
+                                            }}
+                                            disabled={!input.trim() || loading || micState !== "idle"}
+                                            style={{
+                                                width: 34, height: 34, borderRadius: 9, border: "none",
+                                                background: input.trim() && !loading ? "var(--btn)" : "var(--subtle)",
+                                                cursor: input.trim() && !loading ? "pointer" : "not-allowed",
+                                                display: "flex", alignItems: "center", justifyContent: "center",
+                                                flexShrink: 0, transition: "all 0.15s",
+                                            }}
+                                        >
+                                            <svg width="14" height="14" fill="none" stroke={input.trim() && !loading ? "white" : "#A1A1AA"} strokeWidth="2.2" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                 </div>
-
-                {/* Score bars */}
-                <div className="space-y-4 text-left">
-                    <ScoreBar label="You" value={scoreData.score.user} color="bg-black" />
-                    <ScoreBar label="AI" value={scoreData.score.ai} color="bg-gray-300" />
-                </div>
-
-                {/* Summary */}
-                <div className="bg-gray-50 rounded-2xl p-5 text-left">
-                    <p className="text-xs font-semibold uppercase tracking-widest text-gray-400 mb-2">
-                        Feedback
-                    </p>
-                    <p className="text-sm text-gray-700 leading-relaxed">{scoreData.summary}</p>
-                </div>
-
-                <button
-                    onClick={() => (window.location.href = "/")}
-                    className="bg-black text-white px-8 py-3 rounded-2xl hover:opacity-80 transition"
-                >
-                    Back to Home
-                </button>
-            </div>
-        </main>
-    );
-}
-
-function ScoreBar({ label, value, color }: { label: string; value: number; color: string }) {
-    return (
-        <div>
-            <div className="flex justify-between mb-1">
-                <span className="text-sm font-medium text-gray-700">{label}</span>
-                <span className="text-sm font-bold text-gray-900">{value}/100</span>
-            </div>
-            <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                    className={`h-full rounded-full transition-all duration-700 ${color}`}
-                    style={{ width: `${value}%` }}
-                />
-            </div>
-        </div>
+            </main>
+        </>
     );
 }
 
 export default function DebatePage() {
     return (
         <Suspense fallback={
-            <main className="min-h-screen bg-gray-50 flex items-center justify-center">
-                <p className="text-gray-400 text-sm">Loading debate session…</p>
+            <main style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                <div style={{ width: 24, height: 24, border: "2px solid var(--border)", borderTopColor: "var(--text)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
             </main>
         }>
             <DebatePageInner />

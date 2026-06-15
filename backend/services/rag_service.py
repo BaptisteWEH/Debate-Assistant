@@ -6,10 +6,14 @@ import requests
 import numpy as np
 import faiss
 
-LUXIA_API_KEY = os.getenv("LUXIA_API_KEY")
 EMBED_URL = "https://bridge.luxiacloud.com/luxia/v1/embedding"
 CHUNK_URL = "https://bridge.luxiacloud.com/luxia/v1/document-chunk"
+
+
+def _api_key() -> str:
+    return os.getenv("LUXIA_API_KEY", "")
 MAX_EMBED_CHARS = 4000
+EMBED_BATCH_SIZE = 32
 
 
 def safe_source_name(filename: str) -> str:
@@ -30,7 +34,7 @@ def luxia_chunk(text: str, chunk_size: int, overlap: int) -> list[dict]:
     response = requests.post(
         CHUNK_URL,
         headers={
-            "apikey": LUXIA_API_KEY,
+            "apikey": _api_key(),
             "Content-Type": "application/json",
             "accept": "application/json",
         },
@@ -60,7 +64,7 @@ def embed_text(text: str, retries: int = 8) -> np.ndarray:
     for attempt in range(retries):
         response = requests.post(
             EMBED_URL,
-            headers={"apikey": LUXIA_API_KEY, "Content-Type": "application/json"},
+            headers={"apikey": _api_key(), "Content-Type": "application/json"},
             json={"inputs": [text]},
             timeout=60,
         )
@@ -77,11 +81,40 @@ def embed_text(text: str, retries: int = 8) -> np.ndarray:
     raise RuntimeError("Luxia embedding failed after retries")
 
 
+def embed_texts_batch(texts: list[str], retries: int = 8) -> list[np.ndarray]:
+    """Embed multiple texts in one API call instead of N sequential calls."""
+    cleaned = []
+    for t in texts:
+        t = t.replace("\x00", " ").strip()
+        cleaned.append(t[:MAX_EMBED_CHARS] if len(t) > MAX_EMBED_CHARS else t)
+
+    wait = 1.0
+    for attempt in range(retries):
+        response = requests.post(
+            EMBED_URL,
+            headers={"apikey": _api_key(), "Content-Type": "application/json"},
+            json={"inputs": cleaned},
+            timeout=120,
+        )
+        if response.status_code == 200:
+            data = response.json()["data"]
+            return [np.array(item["embedding"], dtype="float32") for item in data]
+
+        print(f"[LUXIA EMBED BATCH ERROR] {response.status_code}: {response.text[:300]}")
+        if response.status_code in (429, 500):
+            time.sleep(wait + random.uniform(0, 0.5))
+            wait = min(wait * 2, 60)
+            continue
+        response.raise_for_status()
+
+    raise RuntimeError("Luxia batch embedding failed after retries")
+
+
 class RAGIndex:
     def __init__(self, chunks: list[dict], index: faiss.IndexFlatIP, config: dict):
         self.chunks = chunks
         self.index = index
-        self.config = config  # contains "chunk_size", "overlap", "k"
+        self.config = config
 
     @classmethod
     def from_pages_documents(cls, documents: list[dict]):
@@ -90,11 +123,7 @@ class RAGIndex:
 
         Joins all pages per document, picks an adaptive chunk config based on
         the combined text length across all documents, then chunks each
-        document via the Luxia chunking API and embeds every chunk.
-
-        NOTE: Luxia's document-chunk endpoint does not return page numbers,
-        so start_page/end_page default to 1 for all chunks. Page-level
-        attribution from the original PDF is lost with this strategy.
+        document via the Luxia chunking API and embeds every chunk in batches.
         """
         full_texts = {}
         total_text_len = 0
@@ -126,10 +155,16 @@ class RAGIndex:
         if not all_chunks:
             raise ValueError("No chunks created from documents.")
 
+        texts = [c["text"] for c in all_chunks]
+        n_batches = (len(texts) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
+        print(f"[EMBED] {len(texts)} chunks -> {n_batches} batch call(s)")
+
         embeddings = []
-        for i, c in enumerate(all_chunks):
-            print(f"[EMBED] {i+1}/{len(all_chunks)}")
-            embeddings.append(embed_text(c["text"]))
+        for i in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[i : i + EMBED_BATCH_SIZE]
+            batch_num = i // EMBED_BATCH_SIZE + 1
+            print(f"[EMBED] batch {batch_num}/{n_batches} ({len(batch)} texts)")
+            embeddings.extend(embed_texts_batch(batch))
 
         matrix = np.vstack(embeddings).astype("float32")
         faiss.normalize_L2(matrix)

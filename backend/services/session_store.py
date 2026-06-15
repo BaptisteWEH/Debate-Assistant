@@ -1,29 +1,18 @@
-#session_store.py
-"""
-Module de persistance des sessions dans DynamoDB.
-
-Remplace le dict `sessions = {}` en mémoire par une vraie base de données.
-
-Limitation actuelle : l'index FAISS n'est PAS persisté (il reste en mémoire RAM).
-Si le serveur redémarre, l'index est perdu et doit être reconstruit à partir
-du document original (qui lui est bien sauvegardé).
-"""
-
 import os
 import json
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
-
-# Nom de la table créée dans la console AWS
 TABLE_NAME = "DebateSessions"
+_SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", ".sessions")
+
+
+def _file_path(session_id: str) -> str:
+    os.makedirs(_SESSIONS_DIR, exist_ok=True)
+    return os.path.join(_SESSIONS_DIR, f"{session_id}.json")
 
 
 def _get_table():
-    """
-    Crée un client DynamoDB et retourne l'objet table.
-    Utilise les credentials du .env (chargés par main.py via load_dotenv).
-    """
     dynamodb = boto3.resource(
         "dynamodb",
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
@@ -35,74 +24,75 @@ def _get_table():
 
 
 def save_session(session_id: str, data: dict) -> None:
-    """
-    Sauvegarde une session complète dans DynamoDB.
-
-    `data` contient tout sauf l'index FAISS (qui reste en mémoire).
-    On serialise les structures complexes en JSON pour les stocker.
-    """
-    # On copie pour ne pas modifier l'original
     persistable = {
         "session_id": session_id,
         "filename": data.get("filename", ""),
         "filenames": data.get("filenames", []),
         "document_text": data.get("document_text", ""),
         "ai_position": data.get("ai_position", ""),
-        "difficulty": data.get("difficulty", "medium"),  # add this line
-        # L'historique est une liste, DynamoDB sait gérer ça nativement
+        "level": data.get("level", "easy"),
         "history": data.get("history", []),
+        "user_id": data.get("user_id", ""),
+        "topic_summary": data.get("topic_summary", ""),
+        "created_at": data.get("created_at", ""),
     }
-
-    table = _get_table()
     try:
+        table = _get_table()
         table.put_item(Item=persistable)
-        print(f"[DYNAMODB] Session {session_id} sauvegardée")
-    except ClientError as e:
-        print(f"[DYNAMODB ERROR] {e}")
-        raise
+        print(f"[DYNAMODB] Session {session_id} saved")
+        return
+    except (ClientError, NoCredentialsError, Exception) as e:
+        print(f"[DYNAMODB WARN] Falling back to file store: {e}")
+
+    with open(_file_path(session_id), "w") as f:
+        json.dump(persistable, f)
+    print(f"[FILE STORE] Session {session_id} saved")
 
 
 def load_session(session_id: str) -> dict | None:
-    """
-    Récupère une session depuis DynamoDB.
-    Retourne None si la session n'existe pas.
-
-    Attention : ne retourne PAS l'index FAISS (qui n'est pas persisté).
-    Le code appelant doit le reconstruire si nécessaire.
-    """
-    table = _get_table()
     try:
+        table = _get_table()
         response = table.get_item(Key={"session_id": session_id})
         item = response.get("Item")
+        if item is not None:
+            print(f"[DYNAMODB] Session {session_id} loaded")
+            return item
+        print(f"[DYNAMODB] Session {session_id} not found")
+    except (ClientError, NoCredentialsError, Exception) as e:
+        print(f"[DYNAMODB WARN] Falling back to file store: {e}")
 
-        if item is None:
-            print(f"[DYNAMODB] Session {session_id} introuvable")
-            return None
-
-        print(f"[DYNAMODB] Session {session_id} chargée")
-        return item
-
-    except ClientError as e:
-        print(f"[DYNAMODB ERROR] {e}")
-        return None
+    path = _file_path(session_id)
+    if os.path.exists(path):
+        with open(path) as f:
+            print(f"[FILE STORE] Session {session_id} loaded")
+            return json.load(f)
+    return None
 
 
 def delete_session(session_id: str) -> None:
-    """Supprime une session (utile pour les tests)."""
-    table = _get_table()
     try:
+        table = _get_table()
         table.delete_item(Key={"session_id": session_id})
-        print(f"[DYNAMODB] Session {session_id} supprimée")
-    except ClientError as e:
-        print(f"[DYNAMODB ERROR] {e}")
+        print(f"[DYNAMODB] Session {session_id} deleted")
+    except (ClientError, NoCredentialsError, Exception) as e:
+        print(f"[DYNAMODB WARN] {e}")
+
+    path = _file_path(session_id)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[FILE STORE] Session {session_id} deleted")
 
 
 def list_session_ids() -> list[str]:
-    """Liste tous les session_id existants (utile pour debug)."""
-    table = _get_table()
     try:
+        table = _get_table()
         response = table.scan(ProjectionExpression="session_id")
         return [item["session_id"] for item in response.get("Items", [])]
-    except ClientError as e:
-        print(f"[DYNAMODB ERROR] {e}")
+    except (ClientError, NoCredentialsError, Exception) as e:
+        print(f"[DYNAMODB WARN] {e}")
+
+    if not os.path.exists(_SESSIONS_DIR):
         return []
+    return [
+        f[:-5] for f in os.listdir(_SESSIONS_DIR) if f.endswith(".json")
+    ]
