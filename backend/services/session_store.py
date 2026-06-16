@@ -30,7 +30,7 @@ def save_session(session_id: str, data: dict) -> None:
         "filenames": data.get("filenames", []),
         "document_text": data.get("document_text", ""),
         "ai_position": data.get("ai_position", ""),
-        "difficulty": data.get("difficulty", "easy"),
+        "level": data.get("level", "easy"),
         "history": data.get("history", []),
         "user_id": data.get("user_id", ""),
         "topic_summary": data.get("topic_summary", ""),
