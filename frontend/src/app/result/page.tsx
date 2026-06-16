@@ -209,7 +209,7 @@ export default function ResultPage() {
                         onClick={handleDownload}
                         style={{
                             display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "var(--text-3)",
-                            background: "var(--card)", border: "1px solid var(--border)",
+                            background: "var(--card)", border: "1px solid #BFDBFE",
                             borderRadius: 9, padding: "7px 14px", cursor: "pointer",
                             boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
                         }}
@@ -226,7 +226,7 @@ export default function ResultPage() {
 
                     {/* Score hero */}
                     <div style={{
-                        background: "var(--card)", border: "1px solid var(--border)",
+                        background: "var(--card)", border: "1px solid #BFDBFE",
                         borderRadius: 20, padding: "40px 36px", marginBottom: 16, textAlign: "center",
                         boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
                     }}>
@@ -269,7 +269,7 @@ export default function ResultPage() {
 
                     {/* Score breakdown */}
                     <div style={{
-                        background: "var(--card)", border: "1px solid var(--border)",
+                        background: "var(--card)", border: "1px solid #BFDBFE",
                         borderRadius: 20, padding: "28px", marginBottom: 16,
                         boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
                     }}>
@@ -281,12 +281,12 @@ export default function ResultPage() {
                             const score = result?.dimensions?.[d.key] ?? null;
                             return (
                                 <div key={d.key} style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: i < arr.length - 1 ? 14 : 0 }}>
-                                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--text-3)", flexShrink: 0 }} />
+                                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: d.color, flexShrink: 0 }} />
                                     <span style={{ fontSize: 14, color: "var(--text-2)", width: 170, flexShrink: 0 }}>{d.label}</span>
                                     <div style={{ flex: 1, height: 4, background: "var(--subtle)", borderRadius: 999, overflow: "hidden" }}>
                                         <div style={{
                                             width: animated && score != null ? `${score}%` : "0%",
-                                            height: "100%", background: "var(--text)", borderRadius: 999,
+                                            height: "100%", background: d.color, borderRadius: 999,
                                             transition: `width 1s cubic-bezier(0.25, 1, 0.5, 1) ${i * 80}ms`,
                                         }} />
                                     </div>
@@ -309,7 +309,7 @@ export default function ResultPage() {
                                 const isFullWidth = i === QUAL_CARDS.length - 1 && QUAL_CARDS.length % 2 !== 0;
                                 return (
                                     <div key={card.key} style={{
-                                        background: "var(--card)", border: "1px solid var(--border)",
+                                        background: "var(--card)", border: "1px solid #BFDBFE",
                                         borderRadius: 16, padding: "20px",
                                         gridColumn: isFullWidth ? "1 / -1" : undefined,
                                         boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
@@ -340,7 +340,7 @@ export default function ResultPage() {
 
                     {/* Email report */}
                     <div className="no-print" style={{
-                        background: "var(--card)", border: "1px solid var(--border)",
+                        background: "var(--card)", border: "1px solid #BFDBFE",
                         borderRadius: 20, padding: "28px", marginBottom: 16,
                         boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
                     }}>
@@ -358,7 +358,7 @@ export default function ResultPage() {
                                 onKeyDown={(e) => { if (e.key === "Enter") handleSendEmail(); }}
                                 placeholder="your@email.com"
                                 style={{
-                                    flex: 1, border: "1px solid var(--border)", borderRadius: 10,
+                                    flex: 1, border: "1px solid #BFDBFE", borderRadius: 10,
                                     padding: "10px 14px", fontSize: 14, outline: "none",
                                     fontFamily: "inherit", transition: "border-color 0.15s",
                                     background: "var(--bg)", color: "var(--text)",
@@ -396,7 +396,7 @@ export default function ResultPage() {
 
                     {/* What's next */}
                     <div className="no-print" style={{
-                        background: "var(--card)", border: "1px solid var(--border)",
+                        background: "var(--card)", border: "1px solid #BFDBFE",
                         borderRadius: 20, padding: "28px",
                         boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
                     }}>
@@ -406,7 +406,7 @@ export default function ResultPage() {
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                             <Link href="/upload" style={{
                                 display: "flex", flexDirection: "column", gap: 4, padding: "18px",
-                                border: "1px solid var(--border)", borderRadius: 14, textDecoration: "none",
+                                border: "1px solid #BFDBFE", borderRadius: 14, textDecoration: "none",
                                 background: "var(--subtle)",
                             }}
                                 className="hover:border-zinc-300 transition-all">
