@@ -1,5 +1,6 @@
 import Link from "next/link";
 import AuthButtonWrapper from "@/components/AuthButtonWrapper";
+import HeroButtonsWrapper from "@/components/HeroButtonsWrapper";
 
 const STEPS = [
     {
@@ -101,31 +102,7 @@ export default function Home() {
                     and get coached on 6 dimensions every session.
                 </p>
 
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
-                    <Link href="/login" style={{
-                        display: "inline-flex", alignItems: "center", gap: 8,
-                        background: "white", color: "#08090A",
-                        borderRadius: 999, padding: "14px 32px",
-                        fontSize: 14, fontWeight: 700, textDecoration: "none",
-                        letterSpacing: "0.02em",
-                        boxShadow: "0 2px 16px rgba(0,0,0,0.3)",
-                    }}
-                        className="hover:opacity-90 transition-opacity">
-                        Create account →
-                    </Link>
-                    <Link href="/upload" style={{
-                        display: "inline-flex", alignItems: "center", gap: 8,
-                        background: "transparent",
-                        border: "1.5px solid rgba(255,255,255,0.28)",
-                        color: "rgba(255,255,255,0.75)",
-                        borderRadius: 999, padding: "14px 32px",
-                        fontSize: 14, fontWeight: 600, textDecoration: "none",
-                        letterSpacing: "0.02em",
-                    }}
-                        className="hover:border-white hover:text-white transition-colors">
-                        Try without account
-                    </Link>
-                </div>
+                <HeroButtonsWrapper variant="hero" />
 
                 {/* Stats */}
                 <div style={{
@@ -231,25 +208,7 @@ export default function Home() {
                             Upload a document and start your first session in under a minute.
                         </p>
                     </div>
-                    <div style={{ display: "flex", gap: 12, flexShrink: 0 }}>
-                        <Link href="/login" style={{
-                            background: "white", color: "#08090A", fontWeight: 700, fontSize: 14,
-                            padding: "13px 28px", borderRadius: 999, textDecoration: "none",
-                            whiteSpace: "nowrap",
-                        }}
-                            className="hover:opacity-90 transition-opacity">
-                            Create account
-                        </Link>
-                        <Link href="/upload" style={{
-                            border: "1.5px solid rgba(255,255,255,0.25)", color: "rgba(255,255,255,0.7)",
-                            fontWeight: 600, fontSize: 14,
-                            padding: "13px 28px", borderRadius: 999, textDecoration: "none",
-                            whiteSpace: "nowrap",
-                        }}
-                            className="hover:border-white hover:text-white transition-colors">
-                            Try without account
-                        </Link>
-                    </div>
+                    <HeroButtonsWrapper variant="cta" />
                 </div>
             </section>
 

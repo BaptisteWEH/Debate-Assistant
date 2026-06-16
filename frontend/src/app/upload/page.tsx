@@ -135,6 +135,8 @@ export default function UploadPage() {
                 throw new Error(err.detail ?? `Server error ${res.status}`);
             }
             const data = await res.json();
+            const blobUrl = URL.createObjectURL(file);
+            sessionStorage.setItem("pdf-viewer-url", blobUrl);
             const params = new URLSearchParams({
                 session_id: data.session_id ?? sessionId,
                 opening: data.opening_statement ?? "",
