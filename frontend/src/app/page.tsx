@@ -90,7 +90,7 @@ export default function Home() {
                     maxWidth: 780,
                 }}>
                     Argue better,<br />
-                    <span style={{ color: "rgba(255,255,255,0.35)" }}>every round.</span>
+                    <span style={{ color: "#D0E7FF" }}>every round.</span>
                 </h1>
 
                 <p style={{
@@ -159,11 +159,11 @@ export default function Home() {
             </section>
 
             {/* How it works */}
-            <section style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
+            <section style={{ background: "#D0E7FF", borderBottom: "1px solid #BFDBFE" }}>
                 <div style={{ maxWidth: 1080, margin: "0 auto", padding: "80px 40px" }}>
                     <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 64 }}>
                         <div style={{ paddingTop: 4 }}>
-                            <p style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--text-4)" }}>How it works</p>
+                            <p style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#08090A" }}>How it works</p>
                         </div>
                         <div>
                             {STEPS.map((s, i) => (
@@ -173,7 +173,7 @@ export default function Home() {
                                     marginBottom: i < STEPS.length - 1 ? 36 : 0,
                                     borderBottom: i < STEPS.length - 1 ? "1px solid var(--border)" : "none",
                                 }}>
-                                    <span style={{ fontSize: 40, fontWeight: 800, color: "var(--step-num)", letterSpacing: "-0.04em", lineHeight: 1, paddingTop: 2 }}>{s.n}</span>
+                                    <span style={{ fontSize: 40, fontWeight: 800, color: "white", letterSpacing: "-0.04em", lineHeight: 1, paddingTop: 2 }}>{s.n}</span>
                                     <div>
                                         <h3 style={{ fontSize: 17, fontWeight: 700, color: "var(--text)", marginBottom: 8, letterSpacing: "-0.01em" }}>{s.title}</h3>
                                         <p style={{ fontSize: 15, color: "var(--text-3)", lineHeight: 1.7 }}>{s.body}</p>
@@ -202,8 +202,8 @@ export default function Home() {
                                     alignItems: "baseline",
                                 }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                                        <div style={{ width: 32, height: 32, background: "#EFF6FF", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                                            <svg width="15" height="15" fill="none" stroke="#2563EB" strokeWidth="1.5" viewBox="0 0 24 24">
+                                        <div style={{ width: 32, height: 32, background: "#D0E7FF", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                            <svg width="15" height="15" fill="none" stroke="#CBD5E1" strokeWidth="1.5" viewBox="0 0 24 24">
                                                 <path strokeLinecap="round" strokeLinejoin="round" d={f.icon} />
                                             </svg>
                                         </div>

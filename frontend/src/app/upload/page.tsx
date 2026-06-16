@@ -75,13 +75,14 @@ const LOADING_STEPS = [
 
 export default function UploadPage() {
     const [file, setFile] = useState<File | null>(null);
-    const [level, setLevel] = useState<Level>(() => {
-        if (typeof window !== "undefined") {
-            const saved = localStorage.getItem("dc-default-level") as Level | null;
-            if (saved && ["easy", "intermediate", "hard"].includes(saved)) return saved;
+    const [level, setLevel] = useState<Level>("easy");
+
+    useEffect(() => {
+        const saved = localStorage.getItem("dc-default-level") as Level | null;
+        if (saved && (["easy", "intermediate", "hard"] as string[]).includes(saved)) {
+            setLevel(saved);
         }
-        return "easy";
-    });
+    }, []);
     const [isUploading, setIsUploading] = useState(false);
     const [loadingStep, setLoadingStep] = useState(0);
     const [errorMsg, setErrorMsg] = useState("");
@@ -228,6 +229,7 @@ export default function UploadPage() {
                         return (
                             <button
                                 key={l.id}
+                                type="button"
                                 onClick={() => setLevel(l.id)}
                                 style={{
                                     flex: 1, padding: "9px 0", borderRadius: 7, cursor: "pointer",
@@ -247,10 +249,9 @@ export default function UploadPage() {
 
                 {/* Level detail panel */}
                 <div style={{
-                    background: "#EFF6FF", border: "1px solid #BFDBFE",
-                    borderLeft: "3px solid #2563EB",
+                    background: "white", border: "1px solid var(--border)",
                     borderRadius: 14, padding: "22px 24px", marginBottom: 40,
-                    boxShadow: "0 1px 4px rgba(37,99,235,0.08)",
+                    boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
                     transition: "all 0.2s",
                 }}>
                     <div style={{ textAlign: "center", marginBottom: 16 }}>
@@ -350,7 +351,7 @@ export default function UploadPage() {
                     disabled={!file}
                     style={{
                         width: "100%",
-                        background: file ? selectedLevel.accent : "var(--border)",
+                        background: file ? "#08090A" : "var(--border)",
                         color: file ? "white" : "#A1A1AA",
                         border: "none",
                         borderRadius: 12, padding: "15px 24px",

@@ -258,7 +258,7 @@ class DebateAgent:
         self.api_key = luxia_api_key
         self.model_name = model_name
 
-    def _call_luxia(self, prompt: str, retries: int = 5, lowercase: bool = False) -> str:
+    def _call_luxia(self, prompt: str, retries: int = 5, lowercase: bool = False, temperature: float = 0) -> str:
         wait_time = 1.0
         for attempt in range(retries):
             try:
@@ -268,7 +268,7 @@ class DebateAgent:
                     json={
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0,
+                        "temperature": temperature,
                         "stream": False,
                     },
                     timeout=30,
@@ -438,6 +438,7 @@ class DebateAgent:
         session_data: dict,
         feedback_fn,
         difficulty_cfg: dict | None = None,
+        regenerate: bool = False,
     ) -> dict:
         if difficulty_cfg is None:
             difficulty_cfg = DIFFICULTY_CONFIG["easy"]
@@ -531,13 +532,20 @@ class DebateAgent:
         history_text = "\n".join(
             f"{'AI' if msg['role'] == 'ai' else 'User'}: {msg['text']}" for msg in history
         )
+        regen_note = (
+            "\nIMPORTANT: The user has requested a different response. "
+            "Use a completely different angle, argument structure, or piece of evidence than your previous reply. "
+            "Do not repeat or paraphrase what you said before."
+            if regenerate else ""
+        )
         prompt = MAIN_PROMPT_TEMPLATE.format(
-            persona=persona, fallacy_note=fallacy_note, ai_position=ai_position,
+            persona=persona + regen_note, fallacy_note=fallacy_note, ai_position=ai_position,
             context="\n\n---\n\n".join(e["text"] for e in evidence),
             history_text=history_text, user_statement=user_message,
         )
+        temperature = 0.75 if regenerate else 0
         return {
-            "response": self._call_luxia(prompt),
+            "response": self._call_luxia(prompt, temperature=temperature),
             "evidence": evidence,
             "fallacy": {"has_fallacy": fallacy_label != "none", "fallacy_type": fallacy_label,
                         "explanation": FALLACY_DESCRIPTIONS.get(fallacy_label, "No fallacy detected.")},

@@ -95,6 +95,17 @@ function DebatePageInner() {
     const [elapsed, setElapsed]           = useState(0);
     const [roundStats, setRoundStats]     = useState<number[]>([]);
     const [fallacyCount, setFallacyCount] = useState(0);
+    const [isEnding, setIsEnding]         = useState(false);
+    const [endingStep, setEndingStep]     = useState(0);
+    const [reactions, setReactions]       = useState<Record<number, "up" | "down">>({});
+    const [copiedIdx, setCopiedIdx]       = useState<number | null>(null);
+    const [regenCount, setRegenCount]     = useState(0);
+
+    const ENDING_STEPS = [
+        "Analyzing your arguments...",
+        "Calculating dimension scores...",
+        "Generating coaching feedback...",
+    ];
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef   = useRef<Blob[]>([]);
@@ -149,8 +160,9 @@ function DebatePageInner() {
 
             if (data.agent_decision === "end_debate" && data.session_feedback) {
                 const fb = data.session_feedback;
+                const regenPenalty = Math.min(regenCount * 5, 25);
                 sessionStorage.setItem("debateResult", JSON.stringify({
-                    user_score:  fb.score?.user ?? 0,
+                    user_score:  Math.max(0, (fb.score?.user ?? 0) - regenPenalty),
                     ai_score:    fb.score?.ai ?? 0,
                     summary:     fb.summary ?? "",
                     level:       levelFromUrl,
@@ -206,8 +218,60 @@ function DebatePageInner() {
         else if (micState === "recording") stopRecording();
     };
 
-    const endSession = async () => {
+    const handleCopy = (text: string, idx: number) => {
+        navigator.clipboard.writeText(text);
+        setCopiedIdx(idx);
+        setTimeout(() => setCopiedIdx(null), 2000);
+    };
+
+    const handleReact = (idx: number, r: "up" | "down") => {
+        setReactions((prev) => ({ ...prev, [idx]: prev[idx] === r ? undefined as unknown as "up" | "down" : r }));
+    };
+
+    const handleRegenerate = async () => {
+        const lastUserIdx = [...messages].reverse().findIndex((m) => m.role === "user");
+        if (lastUserIdx === -1 || loading) return;
+
+        const userMsgIdx = messages.length - 1 - lastUserIdx;
+        const userMsg = messages[userMsgIdx];
+        const truncated = messages.slice(0, userMsgIdx + 1);
+
+        setFallacy(null);
+        setMessages(truncated);
         setLoading(true);
+        setRegenCount((c) => c + 1);
+
+        try {
+            const res = await fetch(`${API_BASE}/debate`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    message: userMsg.text,
+                    session_id: sessionId,
+                    regenerate: true,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
+
+            setMessages([...truncated, { role: "ai", text: data.response, timestamp: formatTime(new Date()) }]);
+            setEvidence(data.evidence ?? []);
+            const hasFallacy = data.fallacy?.has_fallacy;
+            setFallacy(hasFallacy ? data.fallacy : null);
+            if (hasFallacy) setFallacyCount((c) => c + 1);
+        } catch (err) {
+            console.error(err);
+            setMessages([...truncated, { role: "ai", text: "Connection error. Please check the backend is running.", timestamp: formatTime(new Date()) }]);
+        }
+        setLoading(false);
+    };
+
+    const endSession = async () => {
+        setIsEnding(true);
+        setEndingStep(0);
+        const stepTimer = setInterval(() => {
+            setEndingStep((s) => Math.min(s + 1, ENDING_STEPS.length - 1));
+        }, 2500);
         try {
             const res  = await fetch(`${API_BASE}/end-session`, {
                 method: "POST",
@@ -216,22 +280,58 @@ function DebatePageInner() {
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
+            const regenPenalty = Math.min(regenCount * 5, 25);
             sessionStorage.setItem("debateResult", JSON.stringify({
-                user_score:  data.score.user,
+                user_score:  Math.max(0, data.score.user - regenPenalty),
                 ai_score:    data.score.ai,
                 summary:     data.summary,
                 level:       levelFromUrl,
                 dimensions:  data.dimensions ?? {},
                 qualitative: data.qualitative ?? {},
             }));
+            clearInterval(stepTimer);
             router.push("/result");
         } catch {
+            clearInterval(stepTimer);
             alert("Could not end session. Please try again.");
-            setLoading(false);
+            setIsEnding(false);
         }
     };
 
     const turns = Math.floor((messages.length - 1) / 2);
+
+    if (isEnding) {
+        return (
+            <main style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif" }}>
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                <div style={{ textAlign: "center", maxWidth: 380, padding: "0 24px" }}>
+                    <div style={{
+                        width: 64, height: 64, borderRadius: "50%",
+                        background: "linear-gradient(135deg, #334155 0%, #0F172A 100%)",
+                        boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+                        display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 32px",
+                    }}>
+                        <svg style={{ animation: "spin 0.8s linear infinite" }} width="24" height="24" fill="none" stroke="white" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                        </svg>
+                    </div>
+                    <h2 style={{ fontSize: 22, fontWeight: 700, color: "var(--text)", marginBottom: 10, letterSpacing: "-0.02em" }}>Scoring your debate</h2>
+                    <p style={{ fontSize: 15, color: "var(--text-3)", marginBottom: 48 }}>{ENDING_STEPS[endingStep]}</p>
+                    <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                        {ENDING_STEPS.map((_, i) => (
+                            <div key={i} style={{
+                                height: 3, borderRadius: 999,
+                                width: i === endingStep ? 28 : 8,
+                                background: i <= endingStep ? "var(--btn)" : "var(--border)",
+                                transition: "all 0.4s ease",
+                            }} />
+                        ))}
+                    </div>
+                    <p style={{ fontSize: 12, color: "var(--text-4)", marginTop: 28 }}>This may take a few seconds</p>
+                </div>
+            </main>
+        );
+    }
 
     return (
         <>
@@ -322,13 +422,13 @@ function DebatePageInner() {
                             <p className="sidebar-sec">Live Performance</p>
                             <SparkBars stats={roundStats} />
                             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                                <div style={{ flex: 1, background: "var(--subtle)", borderRadius: 10, padding: "9px 10px" }}>
-                                    <p style={{ fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1 }}>{turns}</p>
-                                    <p style={{ fontSize: 10, color: "var(--text-4)", marginTop: 3 }}>Rounds</p>
+                                <div style={{ flex: 1, background: "#D0E7FF", borderRadius: 10, padding: "9px 10px" }}>
+                                    <p style={{ fontSize: 20, fontWeight: 800, color: "#1E3A5F", lineHeight: 1 }}>{turns}</p>
+                                    <p style={{ fontSize: 10, color: "#4A7FB5", marginTop: 3 }}>Rounds</p>
                                 </div>
-                                <div style={{ flex: 1, borderRadius: 10, padding: "9px 10px", background: "var(--subtle)" }}>
-                                    <p style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: "var(--text)" }}>{fallacyCount}</p>
-                                    <p style={{ fontSize: 10, marginTop: 3, color: "var(--text-4)" }}>Fallacies</p>
+                                <div style={{ flex: 1, borderRadius: 10, padding: "9px 10px", background: "#D0E7FF" }}>
+                                    <p style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: "#1E3A5F" }}>{fallacyCount}</p>
+                                    <p style={{ fontSize: 10, marginTop: 3, color: "#4A7FB5" }}>Fallacies</p>
                                 </div>
                             </div>
                             {roundStats.length > 1 && (
@@ -466,12 +566,59 @@ function DebatePageInner() {
                                 {messages.map((msg, i) => (
                                     <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start" }}>
                                         {msg.role === "ai" ? (
+                                            <>
                                             <p style={{
                                                 fontSize: 15, lineHeight: 1.75, color: "var(--text)",
                                                 wordBreak: "break-word", overflowWrap: "break-word",
                                             }}>
                                                 {msg.text}
                                             </p>
+                                            <div style={{ display: "flex", alignItems: "center", gap: 2, marginTop: 8 }}>
+                                                    {/* Copy */}
+                                                    <button
+                                                        onClick={() => handleCopy(msg.text, i)}
+                                                        title="Copy"
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: copiedIdx === i ? "#16A34A" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        className="hover:bg-zinc-100"
+                                                    >
+                                                        {copiedIdx === i ? (
+                                                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                                                        ) : (
+                                                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
+                                                        )}
+                                                    </button>
+                                                    {/* Thumbs up */}
+                                                    <button
+                                                        onClick={() => handleReact(i, "up")}
+                                                        title="Good response"
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "up" ? "#2563EB" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        className="hover:bg-zinc-100"
+                                                    >
+                                                        <svg width="14" height="14" fill={reactions[i] === "up" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6.633 10.25c.806 0 1.533-.446 2.031-1.08a9.041 9.041 0 0 1 2.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 0 0 .322-1.672V2.75a.75.75 0 0 1 .75-.75 2.25 2.25 0 0 1 2.25 2.25c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282m0 0h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 0 1-2.649 7.521c-.388.482-.987.729-1.605.729H13.48c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 0 0-1.423-.23H5.904m10.598-9.75H14.25M5.904 18.5c.083.205.173.405.27.602.197.4-.078.898-.523.898h-.908c-.889 0-1.713-.518-1.972-1.368a12 12 0 0 1-.521-3.507c0-1.553.295-3.036.831-4.398C3.387 9.953 4.167 9.5 5 9.5h1.053c.472 0 .745.556.5.96a8.958 8.958 0 0 0-1.302 4.665c0 1.194.232 2.333.654 3.375Z" /></svg>
+                                                    </button>
+                                                    {/* Thumbs down */}
+                                                    <button
+                                                        onClick={() => handleReact(i, "down")}
+                                                        title="Bad response"
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "down" ? "#DC2626" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        className="hover:bg-zinc-100"
+                                                    >
+                                                        <svg width="14" height="14" fill={reactions[i] === "down" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M7.498 15.25H4.372c-1.026 0-1.945-.694-2.054-1.715a12.137 12.137 0 0 1-.068-1.285c0-2.848.992-5.464 2.649-7.521C5.287 4.247 5.886 4 6.504 4h4.016a4.5 4.5 0 0 1 1.423.23l3.114 1.04a4.5 4.5 0 0 0 1.423.23h1.294M7.498 15.25c.618 0 .991.724.725 1.282A7.471 7.471 0 0 0 7.5 19.75 2.25 2.25 0 0 0 9.75 22a.75.75 0 0 0 .75-.75v-.633c0-.573.11-1.14.322-1.672.304-.76.93-1.33 1.653-1.715a9.04 9.04 0 0 0 2.86-2.4c.498-.634 1.226-1.08 2.032-1.08h.384m-10.253 1.5H9.7m8.075-9.75c.01.05.027.1.05.148.593 1.2.925 2.55.925 3.977 0 1.487-.36 2.89-.999 4.125m.023-8.25c-.076-.365.183-.75.575-.75h.908c.889 0 1.713.518 1.972 1.368.339 1.11.521 2.287.521 3.507 0 1.553-.295 3.036-.831 4.398-.306.774-1.086 1.227-1.918 1.227h-1.053c-.472 0-.745-.556-.5-.96a8.95 8.95 0 0 0 .303-.54" /></svg>
+                                                    </button>
+                                                    {/* Regenerate — only on last AI message */}
+                                                    {i === messages.length - 1 && !loading && (
+                                                        <button
+                                                            onClick={handleRegenerate}
+                                                            title={regenCount > 0 ? `Regenerate (−${Math.min((regenCount + 1) * 5, 25)} pts total)` : "Regenerate response"}
+                                                            style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: "var(--text-4)", transition: "all 0.15s", display: "flex", alignItems: "center", gap: 4 }}
+                                                            className="hover:bg-zinc-100"
+                                                        >
+                                                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                                                            {regenCount > 0 && <span style={{ fontSize: 11, color: "#DC2626" }}>−{Math.min(regenCount * 5, 25)}pts</span>}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </>
                                         ) : (
                                             <div style={{
                                                 background: "#D0E7FF",

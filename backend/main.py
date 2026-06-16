@@ -83,6 +83,7 @@ LEVEL_PROMPTS = {
 class DebateRequest(BaseModel):
     message: str
     session_id: str
+    regenerate: bool = False
 
 
 class EndSessionRequest(BaseModel):
@@ -326,6 +327,7 @@ async def debate(req: DebateRequest):
         session_data=session,
         feedback_fn=generate_feedback,
         difficulty_cfg=difficulty_cfg,
+        regenerate=req.regenerate,
     )
 
     session["history"].append({"role": "user", "text": req.message})
