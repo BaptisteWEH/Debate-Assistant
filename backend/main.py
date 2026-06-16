@@ -483,7 +483,8 @@ async def send_report(req: SendReportRequest):
         raise HTTPException(status_code=500, detail="Email not configured.")
 
     result = req.result
-    score = result.get("score", {})
+    user_score = result.get("user_score", result.get("score", {}).get("user", 0))
+    ai_score   = result.get("ai_score",   result.get("score", {}).get("ai",   0))
     dimensions = result.get("dimensions", {})
     qualitative = result.get("qualitative", {})
 
@@ -494,7 +495,7 @@ async def send_report(req: SendReportRequest):
 
     body = (
         f"Your DebateCoach Report\n\n"
-        f"Score - You: {score.get('user', 0)}/100  |  AI: {score.get('ai', 0)}/100\n\n"
+        f"Score: {user_score}/100\n\n"
         f"Summary:\n{result.get('summary', '')}\n\n"
         f"Dimension Scores:\n{dim_lines}\n\n"
         f"Strongest Argument:\n{qualitative.get('strongest_argument', '')}\n\n"

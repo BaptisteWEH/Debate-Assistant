@@ -100,6 +100,9 @@ function DebatePageInner() {
     const [reactions, setReactions]       = useState<Record<number, "up" | "down">>({});
     const [copiedIdx, setCopiedIdx]       = useState<number | null>(null);
     const [regenCount, setRegenCount]     = useState(0);
+    const [pdfUrl, setPdfUrl]             = useState<string | null>(null);
+    const [showPdf, setShowPdf]           = useState(false);
+    const [pdfWidth, setPdfWidth]         = useState(640);
 
     const ENDING_STEPS = [
         "Analyzing your arguments...",
@@ -107,14 +110,44 @@ function DebatePageInner() {
         "Generating coaching feedback...",
     ];
 
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const audioChunksRef   = useRef<Blob[]>([]);
-    const transcriptEndRef = useRef<HTMLDivElement | null>(null);
-    const textareaRef      = useRef<HTMLTextAreaElement | null>(null);
-    const audioRef         = useRef<HTMLAudioElement | null>(null);
-    const timerRef         = useRef<ReturnType<typeof setInterval> | null>(null);
+    const mediaRecorderRef  = useRef<MediaRecorder | null>(null);
+    const audioChunksRef    = useRef<Blob[]>([]);
+    const transcriptEndRef  = useRef<HTMLDivElement | null>(null);
+    const textareaRef       = useRef<HTMLTextAreaElement | null>(null);
+    const audioRef          = useRef<HTMLAudioElement | null>(null);
+    const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+    const isResizingRef     = useRef(false);
+    const resizeStartXRef   = useRef(0);
+    const resizeStartWRef   = useRef(0);
+
+    const startResize = (e: React.MouseEvent) => {
+        isResizingRef.current   = true;
+        resizeStartXRef.current = e.clientX;
+        resizeStartWRef.current = pdfWidth;
+        document.body.style.cursor    = "col-resize";
+        document.body.style.userSelect = "none";
+        const onMove = (ev: MouseEvent) => {
+            if (!isResizingRef.current) return;
+            const delta = resizeStartXRef.current - ev.clientX;
+            setPdfWidth(Math.max(320, Math.min(900, resizeStartWRef.current + delta)));
+        };
+        const onUp = () => {
+            isResizingRef.current = false;
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+    };
 
     const levelCfg = LEVEL_CONFIG[levelFromUrl] ?? LEVEL_CONFIG.easy;
+
+    useEffect(() => {
+        const url = sessionStorage.getItem("pdf-viewer-url");
+        if (url) setPdfUrl(url);
+    }, []);
 
     useEffect(() => {
         timerRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
@@ -359,12 +392,12 @@ function DebatePageInner() {
                     boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
                 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <svg width="28" height="28" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
+                        <svg width="40" height="40" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
                                 <ellipse cx="21.8432" cy="40" rx="21.8432" ry="40" transform="matrix(-0.659044 0.752104 0.752104 0.659044 49.791 18.9385)" fill="currentColor"/>
                                 <ellipse cx="65.4794" cy="61.7286" rx="21.8432" ry="40" transform="rotate(48.773 65.4794 61.7286)" fill="currentColor"/>
                             </svg>
-                        <span style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>DebateCoach</span>
-                        <span style={{ fontSize: 12, color: "var(--text-4)", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginLeft: 6 }}>
+                        <span style={{ fontSize: 20, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>DebateCoach</span>
+                        <span style={{ fontSize: 12, color: "var(--text-4)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginLeft: 6 }}>
                             {filenameFromUrl}
                         </span>
                     </div>
@@ -389,7 +422,27 @@ function DebatePageInner() {
                         </div>
                     </div>
 
-                    <button
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {pdfUrl && (
+                            <button
+                                onClick={() => setShowPdf((v) => !v)}
+                                style={{
+                                    display: "flex", alignItems: "center", gap: 5,
+                                    background: showPdf ? "#D0E7FF" : "var(--card)",
+                                    border: showPdf ? "1px solid #BFDBFE" : "1px solid var(--border)",
+                                    borderRadius: 9, padding: "8px 14px", cursor: "pointer",
+                                    color: showPdf ? "#1E3A5F" : "var(--text-3)",
+                                    fontSize: 13, fontWeight: 600,
+                                    transition: "all 0.15s",
+                                }}
+                            >
+                                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                </svg>
+                                {showPdf ? "Hide PDF" : "View PDF"}
+                            </button>
+                        )}
+                        <button
                         onClick={endSession}
                         disabled={loading}
                         style={{
@@ -405,6 +458,7 @@ function DebatePageInner() {
                         </svg>
                         End &amp; Score
                     </button>
+                    </div>
                 </header>
 
                 {/* Body */}
@@ -578,7 +632,7 @@ function DebatePageInner() {
                                                     <button
                                                         onClick={() => handleCopy(msg.text, i)}
                                                         title="Copy"
-                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: copiedIdx === i ? "#16A34A" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: copiedIdx === i ? "#3F3F46" : "var(--text-4)", transition: "all 0.15s" }}
                                                         className="hover:bg-zinc-100"
                                                     >
                                                         {copiedIdx === i ? (
@@ -591,7 +645,7 @@ function DebatePageInner() {
                                                     <button
                                                         onClick={() => handleReact(i, "up")}
                                                         title="Good response"
-                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "up" ? "#2563EB" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "up" ? "#3F3F46" : "var(--text-4)", transition: "all 0.15s" }}
                                                         className="hover:bg-zinc-100"
                                                     >
                                                         <svg width="14" height="14" fill={reactions[i] === "up" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6.633 10.25c.806 0 1.533-.446 2.031-1.08a9.041 9.041 0 0 1 2.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 0 0 .322-1.672V2.75a.75.75 0 0 1 .75-.75 2.25 2.25 0 0 1 2.25 2.25c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282m0 0h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 0 1-2.649 7.521c-.388.482-.987.729-1.605.729H13.48c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 0 0-1.423-.23H5.904m10.598-9.75H14.25M5.904 18.5c.083.205.173.405.27.602.197.4-.078.898-.523.898h-.908c-.889 0-1.713-.518-1.972-1.368a12 12 0 0 1-.521-3.507c0-1.553.295-3.036.831-4.398C3.387 9.953 4.167 9.5 5 9.5h1.053c.472 0 .745.556.5.96a8.958 8.958 0 0 0-1.302 4.665c0 1.194.232 2.333.654 3.375Z" /></svg>
@@ -600,7 +654,7 @@ function DebatePageInner() {
                                                     <button
                                                         onClick={() => handleReact(i, "down")}
                                                         title="Bad response"
-                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "down" ? "#DC2626" : "var(--text-4)", transition: "all 0.15s" }}
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: reactions[i] === "down" ? "#3F3F46" : "var(--text-4)", transition: "all 0.15s" }}
                                                         className="hover:bg-zinc-100"
                                                     >
                                                         <svg width="14" height="14" fill={reactions[i] === "down" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M7.498 15.25H4.372c-1.026 0-1.945-.694-2.054-1.715a12.137 12.137 0 0 1-.068-1.285c0-2.848.992-5.464 2.649-7.521C5.287 4.247 5.886 4 6.504 4h4.016a4.5 4.5 0 0 1 1.423.23l3.114 1.04a4.5 4.5 0 0 0 1.423.23h1.294M7.498 15.25c.618 0 .991.724.725 1.282A7.471 7.471 0 0 0 7.5 19.75 2.25 2.25 0 0 0 9.75 22a.75.75 0 0 0 .75-.75v-.633c0-.573.11-1.14.322-1.672.304-.76.93-1.33 1.653-1.715a9.04 9.04 0 0 0 2.86-2.4c.498-.634 1.226-1.08 2.032-1.08h.384m-10.253 1.5H9.7m8.075-9.75c.01.05.027.1.05.148.593 1.2.925 2.55.925 3.977 0 1.487-.36 2.89-.999 4.125m.023-8.25c-.076-.365.183-.75.575-.75h.908c.889 0 1.713.518 1.972 1.368.339 1.11.521 2.287.521 3.507 0 1.553-.295 3.036-.831 4.398-.306.774-1.086 1.227-1.918 1.227h-1.053c-.472 0-.745-.556-.5-.96a8.95 8.95 0 0 0 .303-.54" /></svg>
@@ -742,6 +796,62 @@ function DebatePageInner() {
                             </div>
                         </div>
                     </section>
+
+                    {/* PDF panel — right side */}
+                    {showPdf && pdfUrl && (
+                        <div style={{
+                            width: pdfWidth, flexShrink: 0,
+                            display: "flex", flexDirection: "row", overflow: "hidden",
+                        }}>
+                        {/* Drag handle */}
+                        <div
+                            onMouseDown={startResize}
+                            style={{
+                                width: 6, flexShrink: 0, cursor: "col-resize",
+                                background: "transparent",
+                                borderLeft: "1px solid var(--border)",
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                transition: "background 0.15s",
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = "#E4E4E7")}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                        >
+                            <div style={{ width: 2, height: 32, borderRadius: 99, background: "#D4D4D8" }} />
+                        </div>
+                        <div style={{
+                            flex: 1, display: "flex", flexDirection: "column", overflow: "hidden",
+                            background: "var(--card)",
+                        }}>
+                            <div style={{
+                                padding: "10px 14px", borderBottom: "1px solid var(--border)",
+                                display: "flex", alignItems: "center", justifyContent: "space-between",
+                                flexShrink: 0,
+                            }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <svg width="13" height="13" fill="none" stroke="var(--text-3)" strokeWidth="1.5" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                    </svg>
+                                    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 340 }}>
+                                        {filenameFromUrl}
+                                    </span>
+                                </div>
+                                <button
+                                    onClick={() => setShowPdf(false)}
+                                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-4)", padding: "3px", borderRadius: 5, display: "flex", alignItems: "center" }}
+                                >
+                                    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <iframe
+                                src={pdfUrl}
+                                style={{ flex: 1, border: "none", width: "100%", display: "block" }}
+                                title="Document viewer"
+                            />
+                        </div>
+                        </div>
+                    )}
                 </div>
             </main>
         </>
