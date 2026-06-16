@@ -103,6 +103,11 @@ function DebatePageInner() {
     const [pdfUrl, setPdfUrl]             = useState<string | null>(null);
     const [showPdf, setShowPdf]           = useState(false);
     const [pdfWidth, setPdfWidth]         = useState(640);
+    const [evidenceByMsg, setEvidenceByMsg] = useState<Record<number, EvidenceItem[]>>({});
+    const [explainIdx, setExplainIdx]     = useState<number | null>(null);
+    const [hintText, setHintText]         = useState<string | null>(null);
+    const [hintLoading, setHintLoading]   = useState(false);
+    const [hintCount, setHintCount]       = useState(0);
 
     const ENDING_STEPS = [
         "Analyzing your arguments...",
@@ -178,8 +183,10 @@ function DebatePageInner() {
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
 
+            const aiMsgIdx = next.length;
             setMessages([...next, { role: "ai", text: data.response, timestamp: formatTime(new Date()) }]);
             setEvidence(data.evidence ?? []);
+            setEvidenceByMsg((prev) => ({ ...prev, [aiMsgIdx]: data.evidence ?? [] }));
 
             const hasFallacy = data.fallacy?.has_fallacy;
             setFallacy(hasFallacy ? data.fallacy : null);
@@ -201,6 +208,7 @@ function DebatePageInner() {
                     level:       levelFromUrl,
                     dimensions:  fb.dimensions ?? {},
                     qualitative: fb.qualitative ?? {},
+                    session_id:  sessionId,
                 }));
                 router.push("/result");
                 return;
@@ -287,8 +295,10 @@ function DebatePageInner() {
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
 
+            const aiMsgIdx = truncated.length;
             setMessages([...truncated, { role: "ai", text: data.response, timestamp: formatTime(new Date()) }]);
             setEvidence(data.evidence ?? []);
+            setEvidenceByMsg((prev) => ({ ...prev, [aiMsgIdx]: data.evidence ?? [] }));
             const hasFallacy = data.fallacy?.has_fallacy;
             setFallacy(hasFallacy ? data.fallacy : null);
             if (hasFallacy) setFallacyCount((c) => c + 1);
@@ -297,6 +307,23 @@ function DebatePageInner() {
             setMessages([...truncated, { role: "ai", text: "Connection error. Please check the backend is running.", timestamp: formatTime(new Date()) }]);
         }
         setLoading(false);
+    };
+
+    const fetchHint = async () => {
+        if (hintLoading || loading) return;
+        setHintLoading(true);
+        setHintText(null);
+        try {
+            const res  = await fetch(`${API_BASE}/hint`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sessionId }),
+            });
+            const data = await res.json();
+            setHintText(data.hint ?? null);
+            setHintCount((c) => c + 1);
+        } catch { setHintText("Could not load hint. Try again."); }
+        setHintLoading(false);
     };
 
     const endSession = async () => {
@@ -314,13 +341,15 @@ function DebatePageInner() {
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
             const regenPenalty = Math.min(regenCount * 5, 25);
+            const hintPenalty  = Math.min(hintCount * 3, 15);
             sessionStorage.setItem("debateResult", JSON.stringify({
-                user_score:  Math.max(0, data.score.user - regenPenalty),
+                user_score:  Math.max(0, data.score.user - regenPenalty - hintPenalty),
                 ai_score:    data.score.ai,
                 summary:     data.summary,
                 level:       levelFromUrl,
                 dimensions:  data.dimensions ?? {},
                 qualitative: data.qualitative ?? {},
+                session_id:  sessionId,
             }));
             clearInterval(stepTimer);
             router.push("/result");
@@ -504,37 +533,65 @@ function DebatePageInner() {
                                     Passages cited by the AI will appear here after each response.
                                 </p>
                             ) : (
-                                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                                    {evidence.map((item) => (
-                                        <div
-                                            key={item.id}
-                                            onClick={() => setActiveEvidenceId(activeEvidenceId === item.id ? null : item.id)}
-                                            style={{
-                                                borderLeft: `2px solid ${activeEvidenceId === item.id ? "var(--text)" : "var(--border)"}`,
-                                                paddingLeft: 12, cursor: "pointer",
-                                                transition: "border-color 0.15s",
-                                            }}
-                                        >
-                                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5, gap: 6 }}>
-                                                <span style={{ fontSize: 10, fontWeight: 600, color: "var(--text-4)", textTransform: "uppercase", letterSpacing: "0.06em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                    {item.source ?? "Document"}{item.pages ? ` · p.${item.pages}` : item.page ? ` · p.${item.page}` : ""}
-                                                </span>
-                                                {item.score !== undefined && (
-                                                    <span style={{ fontSize: 10, color: "var(--text-4)", flexShrink: 0 }}>
-                                                        {Math.round(item.score * 100)}%
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                    {evidence.map((item) => {
+                                        const isUrl = item.source?.startsWith("http");
+                                        const label = isUrl
+                                            ? (() => { try { return new URL(item.source!).hostname.replace("www.", ""); } catch { return item.source!; } })()
+                                            : (item.source ?? "Document");
+                                        const pageLabel = item.pages ? `p.${item.pages}` : item.page ? `p.${item.page}` : null;
+                                        const isActive = activeEvidenceId === item.id;
+                                        return (
+                                            <div
+                                                key={item.id}
+                                                onClick={() => setActiveEvidenceId(isActive ? null : item.id)}
+                                                style={{
+                                                    background: isActive ? "var(--subtle)" : "transparent",
+                                                    border: `1px solid ${isActive ? "var(--border)" : "transparent"}`,
+                                                    borderRadius: 10, padding: "10px 10px",
+                                                    cursor: "pointer", transition: "all 0.15s",
+                                                }}
+                                            >
+                                                {/* Source row */}
+                                                <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 6 }}>
+                                                    {isUrl ? (
+                                                        <svg width="11" height="11" fill="none" stroke="var(--text-4)" strokeWidth="2" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 1 1.242 7.244" />
+                                                        </svg>
+                                                    ) : (
+                                                        <svg width="11" height="11" fill="none" stroke="var(--text-4)" strokeWidth="2" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                                        </svg>
+                                                    )}
+                                                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                                                        {label}
                                                     </span>
-                                                )}
+                                                    <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                                                        {pageLabel && (
+                                                            <span style={{ fontSize: 10, color: "var(--text-4)", background: "var(--border)", borderRadius: 4, padding: "1px 5px" }}>
+                                                                {pageLabel}
+                                                            </span>
+                                                        )}
+                                                        {item.score !== undefined && (
+                                                            <span style={{ fontSize: 10, color: "var(--text-4)" }}>
+                                                                {Math.round(item.score * 100)}%
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                {/* Quote text */}
+                                                <p style={{
+                                                    fontSize: 12, color: "var(--text-3)", lineHeight: 1.6,
+                                                    display: "-webkit-box", WebkitBoxOrient: "vertical" as const,
+                                                    WebkitLineClamp: isActive ? undefined : 3,
+                                                    overflow: "hidden",
+                                                    fontStyle: "italic",
+                                                }}>
+                                                    "{item.text}"
+                                                </p>
                                             </div>
-                                            <p style={{
-                                                fontSize: 12, color: "var(--text-2)", lineHeight: 1.65,
-                                                display: "-webkit-box", WebkitBoxOrient: "vertical" as const,
-                                                WebkitLineClamp: activeEvidenceId === item.id ? undefined : 4,
-                                                overflow: "hidden",
-                                            }}>
-                                                {item.text}
-                                            </p>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -671,7 +728,45 @@ function DebatePageInner() {
                                                             {regenCount > 0 && <span style={{ fontSize: 11, color: "#DC2626" }}>−{Math.min(regenCount * 5, 25)}pts</span>}
                                                         </button>
                                                     )}
+                                                    {/* Why? */}
+                                                    {evidenceByMsg[i] && evidenceByMsg[i].length > 0 && (
+                                                        <button
+                                                            onClick={() => setExplainIdx(explainIdx === i ? null : i)}
+                                                            title="Why did the AI say this?"
+                                                            style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 7, color: explainIdx === i ? "#3F3F46" : "var(--text-4)", transition: "all 0.15s", display: "flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 500 }}
+                                                            className="hover:bg-zinc-100"
+                                                        >
+                                                            <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z" /></svg>
+                                                            Why?
+                                                        </button>
+                                                    )}
                                                 </div>
+                                                {/* Inline evidence (Why? expanded) */}
+                                                {explainIdx === i && evidenceByMsg[i] && (
+                                                    <div style={{ marginTop: 10, width: "100%", display: "flex", flexDirection: "column", gap: 6 }}>
+                                                        <p style={{ fontSize: 10, fontWeight: 700, color: "var(--text-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 2 }}>Sources used</p>
+                                                        {evidenceByMsg[i].map((ev) => {
+                                                            const isUrl = ev.source?.startsWith("http");
+                                                            const label = isUrl
+                                                                ? (() => { try { return new URL(ev.source!).hostname.replace("www.", ""); } catch { return ev.source!; } })()
+                                                                : (ev.source ?? "Document");
+                                                            const pg = ev.pages ? `p.${ev.pages}` : ev.page ? `p.${ev.page}` : null;
+                                                            return (
+                                                                <div key={ev.id} style={{ background: "var(--subtle)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px" }}>
+                                                                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
+                                                                        {isUrl
+                                                                            ? <svg width="11" height="11" fill="none" stroke="var(--text-4)" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 1 1.242 7.244" /></svg>
+                                                                            : <svg width="11" height="11" fill="none" stroke="var(--text-4)" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+                                                                        }
+                                                                        <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-3)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+                                                                        {pg && <span style={{ fontSize: 10, color: "var(--text-4)", background: "var(--border)", borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>{pg}</span>}
+                                                                    </div>
+                                                                    <p style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.6, fontStyle: "italic" }}>"{ev.text}"</p>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
                                             </>
                                         ) : (
                                             <div style={{
@@ -706,6 +801,28 @@ function DebatePageInner() {
                         {/* Input bar */}
                         <div style={{ padding: "12px 24px 20px", background: "var(--bg)", flexShrink: 0 }}>
                             <div style={{ maxWidth: 760, margin: "0 auto" }}>
+                                {/* Hint panel */}
+                                {(hintText || hintLoading) && (
+                                    <div style={{
+                                        marginBottom: 10, borderRadius: 14,
+                                        background: "#FFFBEB", border: "1px solid #FDE68A",
+                                        padding: "12px 14px", display: "flex", gap: 10, alignItems: "flex-start",
+                                    }}>
+                                        <svg width="15" height="15" fill="none" stroke="#D97706" strokeWidth="2" viewBox="0 0 24 24" style={{ flexShrink: 0, marginTop: 1 }}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 0 0 1.5-.189m-1.5.189a6.01 6.01 0 0 1-1.5-.189m3.75 7.478a12.06 12.06 0 0 1-4.5 0m3.75 2.383a14.406 14.406 0 0 1-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 1 0-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" />
+                                        </svg>
+                                        <div style={{ flex: 1 }}>
+                                            <p style={{ fontSize: 11, fontWeight: 700, color: "#92400E", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                                                Coach hint · −{Math.min(hintCount * 3, 15)}pts
+                                            </p>
+                                            {hintLoading
+                                                ? <p style={{ fontSize: 13, color: "#B45309" }}>Thinking…</p>
+                                                : <p style={{ fontSize: 13, color: "#92400E", lineHeight: 1.6 }}>{hintText}</p>
+                                            }
+                                        </div>
+                                        <button onClick={() => setHintText(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#B45309", fontSize: 16, lineHeight: 1, padding: 0, flexShrink: 0 }}>×</button>
+                                    </div>
+                                )}
                                 <div style={{
                                     background: "var(--card)",
                                     border: "1px solid var(--border)",
@@ -749,6 +866,7 @@ function DebatePageInner() {
                                         }}
                                     />
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px 10px" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                         <button
                                             onClick={toggleMic}
                                             disabled={micState === "processing" || loading}
@@ -773,6 +891,28 @@ function DebatePageInner() {
                                                 </svg>
                                             )}
                                         </button>
+                                        {/* Hint button */}
+                                        <button
+                                            onClick={fetchHint}
+                                            disabled={hintLoading || loading}
+                                            title={hintCount > 0 ? `Get hint (−${Math.min((hintCount + 1) * 3, 15)}pts)` : "Get a hint (−3pts)"}
+                                            style={{
+                                                height: 34, borderRadius: 9, border: "1px solid var(--border)",
+                                                cursor: hintLoading || loading ? "not-allowed" : "pointer",
+                                                display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+                                                padding: "0 10px",
+                                                background: hintText ? "#FFFBEB" : "transparent",
+                                                color: hintText ? "#D97706" : "#A1A1AA",
+                                                fontSize: 12, fontWeight: 500,
+                                                transition: "all 0.15s",
+                                            }}
+                                        >
+                                            <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 0 0 1.5-.189m-1.5.189a6.01 6.01 0 0 1-1.5-.189m3.75 7.478a12.06 12.06 0 0 1-4.5 0m3.75 2.383a14.406 14.406 0 0 1-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 1 0-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" />
+                                            </svg>
+                                            Hint
+                                        </button>
+                                        </div>
                                         <button
                                             onClick={() => {
                                                 sendMessage(input);

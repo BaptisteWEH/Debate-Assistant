@@ -95,6 +95,22 @@ class SendReportRequest(BaseModel):
     result: dict
 
 
+class HintRequest(BaseModel):
+    session_id: str
+
+
+class ArgumentMapRequest(BaseModel):
+    session_id: str
+
+
+class SpeechUploadRequest(BaseModel):
+    session_id: str
+    level: str = "easy"
+    text: str
+    speaker: str = "Unknown Speaker"
+    user_id: str | None = None
+
+
 # ─── RAM cache for FAISS indexes + in-memory session fallback ─────────────────
 
 faiss_cache: dict[str, RAGIndex] = {}
@@ -519,6 +535,167 @@ async def send_report(req: SendReportRequest):
     except Exception as e:
         print(f"[SEND-REPORT ERROR] {e}")
         return {"success": False}
+
+
+# ─── POST /hint ───────────────────────────────────────────────────────────────
+
+@app.post("/hint")
+async def get_hint(req: HintRequest):
+    session = _load_session(req.session_id)
+    if not session or not session.get("history"):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = session["history"]
+    last_ai   = next((m["text"] for m in reversed(history) if m["role"] == "ai"),   None)
+    last_user = next((m["text"] for m in reversed(history) if m["role"] == "user"), None)
+
+    if not last_ai:
+        raise HTTPException(status_code=400, detail="No AI message to counter")
+
+    system = (
+        "You are a debate coach whispering a private hint to a student mid-debate. "
+        "Be tactical and direct. Never use phrases like 'I suggest' or 'You could'. "
+        "Write the counter-argument as if the student would say it themselves."
+    )
+    prompt = (
+        f"The AI opponent just argued:\n\"{last_ai}\"\n\n"
+        + (f"The student's last response was:\n\"{last_user}\"\n\n" if last_user else "")
+        + "Give ONE sharp counter-argument in 1-2 sentences. Start directly with the argument, no preamble."
+    )
+
+    try:
+        hint = call_luxia(prompt, system_instruction=system, timeout=30)
+        return {"hint": hint}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── POST /argument-map ───────────────────────────────────────────────────────
+
+@app.post("/argument-map")
+async def get_argument_map(req: ArgumentMapRequest):
+    session = _load_session(req.session_id)
+    if not session or not session.get("history"):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    history = session["history"]
+    all_turns = [
+        f"{'AI' if m['role'] == 'ai' else 'User'}: {m['text']}"
+        for m in history
+    ]
+    transcript = "\n".join(all_turns)
+    if len(transcript) > 4000:
+        transcript = transcript[:4000] + "..."
+
+    system = "You are a debate analyst extracting argument structure. Reply ONLY with valid JSON."
+    prompt = (
+        f"Analyze this debate transcript and extract 3-6 distinct argument threads.\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        "For each main claim the USER made, identify:\n"
+        "- The user's claim (1 short sentence)\n"
+        "- The AI's rebuttal to it (1 short sentence)\n"
+        "- The user's counter-rebuttal if they gave one, or null if they dropped it\n"
+        "- Outcome: 'won' (user successfully defended), 'lost' (AI's rebuttal stood unchallenged), "
+        "'contested' (both sides pushed back), 'dropped' (user never responded to the AI's rebuttal)\n\n"
+        "Reply ONLY with this JSON:\n"
+        "{\n"
+        '  "threads": [\n'
+        '    {\n'
+        '      "claim": "<user claim>",\n'
+        '      "rebuttal": "<AI counter>",\n'
+        '      "counter": "<user response or null>",\n'
+        '      "outcome": "won|lost|contested|dropped"\n'
+        '    }\n'
+        '  ]\n'
+        "}"
+    )
+
+    raw = call_luxia(prompt, system_instruction=system, timeout=60)
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        print(f"[ARGUMENT-MAP] Invalid JSON: {raw}")
+        raise HTTPException(status_code=500, detail="Could not parse argument map")
+
+
+# ─── GET /fetch-youtube ────────────────────────────────────────────────────────
+
+@app.get("/fetch-youtube")
+async def fetch_youtube(url: str):
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        raise HTTPException(status_code=500, detail="youtube_transcript_api not installed on server")
+
+    import re as _re
+    match = _re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Could not extract video ID from URL")
+    video_id = match.group(1)
+
+    try:
+        # youtube-transcript-api 1.x uses instance method
+        ytt = YouTubeTranscriptApi()
+        fetched = ytt.fetch(video_id)
+        text = " ".join(snippet.text for snippet in fetched)
+    except Exception:
+        try:
+            # fallback: 0.x class method returning list of dicts
+            fetched = YouTubeTranscriptApi.get_transcript(video_id)  # type: ignore
+            text = " ".join(entry["text"] for entry in fetched)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"No transcript available for this video: {str(e)}")
+
+    return {"transcript": clean_text(text), "video_id": video_id}
+
+
+# ─── POST /upload-speech ──────────────────────────────────────────────────────
+
+@app.post("/upload-speech")
+async def upload_speech(req: SpeechUploadRequest):
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Speech text is required.")
+
+    _, difficulty_cfg = get_difficulty_config(req.level)
+    text = clean_text(req.text)
+    pseudo_pages = [{"page": 1, "text": text}]
+    documents = [{"filename": req.speaker, "pages": pseudo_pages}]
+
+    rag_index = RAGIndex.from_pages_documents(documents)
+    faiss_cache[req.session_id] = rag_index
+    try:
+        upload_faiss_index(req.session_id, rag_index)
+    except Exception as e:
+        print(f"[S3 SAVE WARNING] {e}")
+
+    opening_result = debate_agent.generate_opening_stance(rag_index, difficulty_cfg)
+    opening = opening_result["response"]
+
+    import datetime
+    session_data = {
+        "session_id": req.session_id,
+        "filename": req.speaker,
+        "filenames": [req.speaker],
+        "document_text": text,
+        "level": req.level,
+        "ai_position": opening,
+        "history": [{"role": "ai", "text": opening}],
+        "topic_summary": opening[:120],
+        "created_at": datetime.datetime.utcnow().isoformat(),
+        "source_type": "speech",
+    }
+    if req.user_id:
+        session_data["user_id"] = req.user_id
+
+    _persist_session(req.session_id, session_data)
+    return {"session_id": req.session_id, "opening_statement": opening}
 
 
 # ─── GET /history/{user_id} ────────────────────────────────────────────────────
