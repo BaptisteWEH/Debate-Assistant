@@ -76,6 +76,11 @@ const LOADING_STEPS = [
 export default function UploadPage() {
     const [file, setFile] = useState<File | null>(null);
     const [level, setLevel] = useState<Level>("easy");
+    const [inputMode, setInputMode] = useState<"pdf" | "speech">("pdf");
+    const [speechText, setSpeechText] = useState("");
+    const [speechSpeaker, setSpeechSpeaker] = useState("");
+    const [youtubeUrl, setYoutubeUrl] = useState("");
+    const [youtubeFetching, setYoutubeFetching] = useState(false);
 
     useEffect(() => {
         const saved = localStorage.getItem("dc-default-level") as Level | null;
@@ -147,6 +152,57 @@ export default function UploadPage() {
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : "Upload failed. Please try again.";
             setErrorMsg(msg);
+            setIsUploading(false);
+        }
+    };
+
+    const handleFetchYoutube = async () => {
+        if (!youtubeUrl.trim()) return;
+        setYoutubeFetching(true);
+        setErrorMsg("");
+        try {
+            const res = await fetch(`${API_BASE}/fetch-youtube?url=${encodeURIComponent(youtubeUrl)}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail ?? "Failed to fetch transcript");
+            setSpeechText(data.transcript);
+        } catch (err: unknown) {
+            setErrorMsg(err instanceof Error ? err.message : "Could not fetch transcript");
+        }
+        setYoutubeFetching(false);
+    };
+
+    const handleStartSpeechDebate = async () => {
+        if (!speechText.trim()) { setErrorMsg("Please paste or fetch a speech first."); return; }
+        setIsUploading(true);
+        setErrorMsg("");
+        const sessionId = crypto.randomUUID();
+        const userId = (session?.user as { id?: string } | undefined)?.id;
+        try {
+            const res = await fetch(`${API_BASE}/upload-speech`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    level,
+                    text: speechText,
+                    speaker: speechSpeaker || "Unknown Speaker",
+                    user_id: userId ?? null,
+                }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail ?? `Server error ${res.status}`);
+            }
+            const data = await res.json();
+            const params = new URLSearchParams({
+                session_id: data.session_id ?? sessionId,
+                opening: data.opening_statement ?? "",
+                level,
+                filename: speechSpeaker || "Speech",
+            });
+            router.push(`/debate?${params.toString()}`);
+        } catch (err: unknown) {
+            setErrorMsg(err instanceof Error ? err.message : "Upload failed. Please try again.");
             setIsUploading(false);
         }
     };
@@ -276,68 +332,101 @@ export default function UploadPage() {
                     </p>
                 </div>
 
-                {/* Upload document */}
-                <div style={{ marginBottom: 14 }}>
-                    <h2 style={{ fontSize: 20, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em" }}>Upload document</h2>
+                {/* Source type tabs */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                    <h2 style={{ fontSize: 20, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em" }}>Your source</h2>
+                    <div style={{ display: "flex", gap: 2, background: "var(--border)", borderRadius: 9, padding: 3 }}>
+                        {(["pdf", "speech"] as const).map((mode) => (
+                            <button key={mode} type="button" onClick={() => { setInputMode(mode); setErrorMsg(""); }}
+                                style={{
+                                    padding: "6px 14px", borderRadius: 7, fontSize: 13, fontWeight: 500, cursor: "pointer",
+                                    border: inputMode === mode ? "1px solid #BFDBFE" : "1px solid transparent",
+                                    background: inputMode === mode ? "#D0E7FF" : "transparent",
+                                    color: inputMode === mode ? "#1E3A5F" : "#71717A",
+                                    transition: "all 0.15s",
+                                }}>
+                                {mode === "pdf" ? "PDF" : "Speech / URL"}
+                            </button>
+                        ))}
+                    </div>
                 </div>
 
-                {!file ? (
-                    <label
-                        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                        onDragLeave={() => setIsDragging(false)}
-                        onDrop={handleDrop}
-                        style={{
-                            display: "block", cursor: "pointer",
-                            border: `1.5px dashed ${isDragging ? "#2563EB" : "var(--border)"}`,
-                            background: isDragging ? "#EFF6FF" : "white",
-                            borderRadius: 16, padding: "52px 24px", textAlign: "center",
-                            transition: "all 0.15s", marginBottom: 32,
-                            boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
-                        }}
-                    >
-                        <input type="file" className="hidden" accept=".pdf" onChange={handleFileChange} />
-                        <div style={{
-                            width: 48, height: 48, borderRadius: 14,
-                            background: "var(--subtle)", border: "1px solid var(--border)",
-                            display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px",
-                        }}>
-                            <svg width="20" height="20" fill="none" stroke="var(--text-3)" strokeWidth="1.5" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m6.75 12-3-3m0 0-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-                            </svg>
+                {inputMode === "pdf" ? (<>
+                    {!file ? (
+                        <label
+                            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                            onDragLeave={() => setIsDragging(false)}
+                            onDrop={handleDrop}
+                            style={{
+                                display: "block", cursor: "pointer",
+                                border: `1.5px dashed ${isDragging ? "#2563EB" : "var(--border)"}`,
+                                background: isDragging ? "#EFF6FF" : "white",
+                                borderRadius: 16, padding: "52px 24px", textAlign: "center",
+                                transition: "all 0.15s", marginBottom: 32,
+                                boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                            }}
+                        >
+                            <input type="file" className="hidden" accept=".pdf" onChange={handleFileChange} />
+                            <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
+                                <svg width="20" height="20" fill="none" stroke="var(--text-3)" strokeWidth="1.5" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m6.75 12-3-3m0 0-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                </svg>
+                            </div>
+                            <p style={{ fontSize: 14, fontWeight: 500, color: "var(--text-2)", marginBottom: 4 }}>Click to upload or drag &amp; drop</p>
+                            <p style={{ fontSize: 13, color: "var(--text-4)" }}>PDF only, up to 50 MB</p>
+                        </label>
+                    ) : (
+                        <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 14, padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, marginBottom: 32, boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
+                            <div style={{ width: 42, height: 42, background: "#F4F4F5", borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                <svg width="18" height="18" fill="none" stroke="#52525B" strokeWidth="1.5" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                </svg>
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</p>
+                                <p style={{ fontSize: 12, color: "var(--text-4)", marginTop: 2 }}>{(file.size / 1024).toFixed(0)} KB · PDF</p>
+                            </div>
+                            <button onClick={() => setFile(null)} style={{ background: "#F4F4F5", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} className="hover:bg-zinc-200 transition-colors">
+                                <svg width="13" height="13" fill="none" stroke="#71717A" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+                            </button>
                         </div>
-                        <p style={{ fontSize: 14, fontWeight: 500, color: "var(--text-2)", marginBottom: 4 }}>
-                            Click to upload or drag &amp; drop
-                        </p>
-                        <p style={{ fontSize: 13, color: "var(--text-4)" }}>PDF only, up to 50 MB</p>
-                    </label>
-                ) : (
-                    <div style={{
-                        background: "var(--card)", border: "1px solid var(--border)",
-                        borderRadius: 14, padding: "18px 20px",
-                        display: "flex", alignItems: "center", gap: 16, marginBottom: 32,
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
-                    }}>
-                        <div style={{ width: 42, height: 42, background: "#F4F4F5", borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                            <svg width="18" height="18" fill="none" stroke="#52525B" strokeWidth="1.5" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-                            </svg>
+                    )}
+                </>) : (<>
+                    {/* YouTube URL fetcher */}
+                    <div style={{ marginBottom: 14 }}>
+                        <p style={{ fontSize: 13, color: "var(--text-3)", marginBottom: 8 }}>Paste a YouTube URL to auto-fetch the transcript:</p>
+                        <div style={{ display: "flex", gap: 8 }}>
+                            <input
+                                type="url"
+                                value={youtubeUrl}
+                                onChange={(e) => setYoutubeUrl(e.target.value)}
+                                placeholder="https://youtube.com/watch?v=..."
+                                style={{ flex: 1, border: "1px solid var(--border)", borderRadius: 10, padding: "10px 14px", fontSize: 14, outline: "none", fontFamily: "inherit", background: "var(--bg)", color: "var(--text)" }}
+                            />
+                            <button onClick={handleFetchYoutube} disabled={youtubeFetching || !youtubeUrl.trim()}
+                                style={{ background: youtubeUrl.trim() ? "#08090A" : "var(--border)", color: youtubeUrl.trim() ? "white" : "#A1A1AA", border: "none", borderRadius: 10, padding: "10px 18px", fontSize: 13, fontWeight: 600, cursor: youtubeUrl.trim() ? "pointer" : "not-allowed", whiteSpace: "nowrap" }}>
+                                {youtubeFetching ? "Fetching…" : "Fetch"}
+                            </button>
                         </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {file.name}
-                            </p>
-                            <p style={{ fontSize: 12, color: "var(--text-4)", marginTop: 2 }}>
-                                {(file.size / 1024).toFixed(0)} KB &middot; PDF
-                            </p>
-                        </div>
-                        <button onClick={() => setFile(null)} style={{ background: "#F4F4F5", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
-                            className="hover:bg-zinc-200 transition-colors">
-                            <svg width="13" height="13" fill="none" stroke="#71717A" strokeWidth="2.5" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-                            </svg>
-                        </button>
                     </div>
-                )}
+                    <p style={{ fontSize: 12, color: "var(--text-4)", marginBottom: 8, textAlign: "center" }}>— or paste transcript directly —</p>
+                    {/* Speaker name */}
+                    <input
+                        type="text"
+                        value={speechSpeaker}
+                        onChange={(e) => setSpeechSpeaker(e.target.value)}
+                        placeholder="Speaker / source name (e.g. Elon Musk — TED 2022)"
+                        style={{ width: "100%", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 14px", fontSize: 14, outline: "none", fontFamily: "inherit", background: "var(--bg)", color: "var(--text)", marginBottom: 8, boxSizing: "border-box" }}
+                    />
+                    {/* Speech text area */}
+                    <textarea
+                        value={speechText}
+                        onChange={(e) => setSpeechText(e.target.value)}
+                        placeholder="Paste the speech or transcript here…"
+                        rows={8}
+                        style={{ width: "100%", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", fontSize: 14, outline: "none", fontFamily: "inherit", background: "var(--bg)", color: "var(--text)", resize: "vertical", marginBottom: 32, boxSizing: "border-box", lineHeight: 1.6 }}
+                    />
+                </>)}
 
                 {errorMsg && (
                     <div style={{ background: "#FFF1F2", border: "1px solid #FECDD3", borderRadius: 12, padding: "12px 16px", marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
@@ -348,30 +437,27 @@ export default function UploadPage() {
                     </div>
                 )}
 
-                <button
-                    onClick={handleStartDebate}
-                    disabled={!file}
-                    style={{
-                        width: "100%",
-                        background: file ? "#08090A" : "var(--border)",
-                        color: file ? "white" : "#A1A1AA",
-                        border: "none",
-                        borderRadius: 12, padding: "15px 24px",
-                        fontSize: 15, fontWeight: 700, cursor: file ? "pointer" : "not-allowed",
-                        transition: "all 0.15s",
-                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                        letterSpacing: "-0.01em",
-                        boxShadow: file ? "0 1px 3px rgba(0,0,0,0.15), 0 4px 12px rgba(0,0,0,0.08)" : "none",
-                    }}
-                    className={file ? "hover:opacity-85 transition-opacity" : ""}
-                >
-                    Start debate
-                    {file && (
-                        <svg width="16" height="16" fill="none" stroke="white" strokeWidth="2.5" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                        </svg>
-                    )}
-                </button>
+                {(() => {
+                    const ready = inputMode === "pdf" ? !!file : !!speechText.trim();
+                    const onClick = inputMode === "pdf" ? handleStartDebate : handleStartSpeechDebate;
+                    return (
+                        <button onClick={onClick} disabled={!ready}
+                            style={{
+                                width: "100%", background: ready ? "#08090A" : "var(--border)",
+                                color: ready ? "white" : "#A1A1AA", border: "none",
+                                borderRadius: 12, padding: "15px 24px", fontSize: 15, fontWeight: 700,
+                                cursor: ready ? "pointer" : "not-allowed", transition: "all 0.15s",
+                                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                                letterSpacing: "-0.01em",
+                                boxShadow: ready ? "0 1px 3px rgba(0,0,0,0.15), 0 4px 12px rgba(0,0,0,0.08)" : "none",
+                            }}
+                            className={ready ? "hover:opacity-85 transition-opacity" : ""}
+                        >
+                            Start debate
+                            {ready && <svg width="16" height="16" fill="none" stroke="white" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>}
+                        </button>
+                    );
+                })()}
             </div>
         </main>
     );
