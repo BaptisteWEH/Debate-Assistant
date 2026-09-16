@@ -40,10 +40,50 @@ The application allows users to upload debate speeches or transcripts, receive s
 
 ---
 
-## 🏗️ Project Structure
+
+# 🎙️ Debate Assistant — AI Debate Coach & Evaluation System
+
+> **Remarque concernant le Frontend :** 
+> La majeure partie du code Frontend a été générée à l'aide d'outils d'IA. L'objectif principal de ce projet était avant tout d'explorer et de maîtriser des concepts **Backend**, tels que la mise en place d'une architecture RAG, l'utilisation de LangChain, le stockage sur MongoDB, les services AWS (S3, EC2) et la manipulation directe des LLM.
+
+---
+
+## 📌 Présentation du projet
+**Debate Assistant** est une application web interactive conçue pour aider les utilisateurs à évaluer, analyser et perfectionner leurs prestations lors de débats (oraux ou écrits).
+
+L'application permet d'uploader des enregistrements ou des transcriptions, de générer un retour détaillé et structuré selon des grilles d'évaluation précises (*rubrics*), et de converser en direct avec un coach IA spécialisé.
+
+---
+
+## 🛠️ Stack Technique & Apprentissages Clés
+
+### 🧠 Intelligence Artificielle & Backend
+* **RAG (Retrieval-Augmented Generation) :** Conception d'un pipeline RAG pour enrichir les réponses du modèle avec du contexte spécifique (règles de débat, critères d'évaluation, documents de référence).
+* **LangChain :** Orchestration des prompts, gestion de la mémoire de conversation (*session store*) et structuration des agents IA.
+* **Appels & Intégration LLM :** Manipulation et intégration directe d'APIs de LLM pour la génération de feedbacks et la notation.
+* **Base de données (MongoDB) :** Utilisation de MongoDB pour le stockage des sessions, des historiques de débat et des grilles d'évaluation.
+
+### ☁️ Cloud & Infrastructure (AWS)
+* **AWS S3 :** Stockage sécurisé des fichiers audio, des transcriptions et des données associées.
+* **AWS EC2 :** Déploiement et hébergement du backend sur une instance cloud EC2.
+
+### 💻 Frontend
+* **Next.js, TypeScript, TailwindCSS :** Interface web moderne (conçue en grande partie via IA pour accélérer le développement UI et se concentrer sur la logique backend).
+
+---
+
+## ✨ Fonctionnalités Principales
+- 📤 **Upload & Analyse :** Soumission de discours et débats pour analyse automatique.
+- 📊 **Évaluation par Grille (Rubric) :** Feedback qualitatif et notation basée sur des critères précis.
+- 💬 **Coach IA Interactif :** Moteur de discussion avec suivi de session et conseils personnalisés.
+- 📜 **Historique :** Conservation et consultation des analyses passées.
+
+---
+
+## 🏗️ Structure du Projet
 ```text
 Debate-Assistant/
-├── backend/               # FastAPI server, RAG pipeline, LangChain agents & MongoDB stores
-├── frontend/              # Next.js App (UI generated with AI assistance)
-├── email-server/          # Node.js microservice for email processing
-└── deploy/                # EC2 deployment scripts (`ec2-setup.sh`)
+├── backend/               # Serveur FastAPI, pipeline RAG, agents LangChain & MongoDB
+├── frontend/              # Application Next.js (Interface générée avec l'aide d'IA)
+├── email-server/          # Microservice Node.js pour le traitement des e-mails
+└── deploy/                # Scripts de déploiement EC2 (`ec2-setup.sh`)
